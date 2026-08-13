@@ -1,6 +1,16 @@
 import { cleanModelOutput } from "../lib/sanitize.js";
 import { ProviderError } from "../lib/errors.js";
 
+// Gemini Nano only accepts [de, en, es, fr, ja]; this is an English-first
+// product, so we declare English on both input (system + user prompt) and
+// output. Per the spec, the same options MUST be passed to availability() and
+// create(), or Chrome silently mis-derives capability and prints the
+// "No output/input language specified" warning.
+const LANG_OPTIONS = Object.freeze({
+  expectedInputs: [{ type: "text", languages: ["en"] }],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+});
+
 // Chrome built-in AI (Gemini Nano) via the Prompt API. No key, runs on-device.
 // `LanguageModel` is a global in extension contexts (service worker + extension
 // pages); it's absent elsewhere (Firefox, page/content context) -> "unsupported".
@@ -12,7 +22,7 @@ export const onDeviceEngine = {
   async availability() {
     if (typeof LanguageModel === "undefined") return "unsupported";
     try {
-      const a = await LanguageModel.availability();
+      const a = await LanguageModel.availability(LANG_OPTIONS);
       if (a === "available") return "ready";
       if (a === "downloadable" || a === "downloading") return "downloadable";
       return "unsupported";
@@ -23,12 +33,9 @@ export const onDeviceEngine = {
 
   async streamImprove({ text, systemPrompt, signal, onChunk }) {
     if (typeof LanguageModel === "undefined") throw new ProviderError(0, "On-device AI is unavailable");
-    // Declare the output language so Chrome attests safety + optimizes quality
-    // (silences the "No output language specified" warning). Gemini Nano only
-    // supports [de, en, es, fr, ja]; this is an English-first product, so "en".
     const session = await LanguageModel.create({
+      ...LANG_OPTIONS,
       initialPrompts: [{ role: "system", content: systemPrompt }],
-      expectedOutputs: [{ type: "text", languages: ["en"] }],
     });
     try {
       let full = "";

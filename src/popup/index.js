@@ -4,7 +4,7 @@ import { validateApiKey, getKeyInfo } from "../lib/openrouter.js";
 import { resolveSystemPrompt } from "../lib/system-prompts.js";
 import { DEFAULT_MODEL, DEFAULT_STYLE, MAX_INPUT_LENGTH, AUTO_FREE_MODEL } from "../lib/constants.js";
 import { getModels } from "../lib/models-cache.js";
-import { resolveActiveEngine, isOnDeviceUsable, describeActiveEngine, engineKeyVisibility, engineUsesModelPicker, engineModelSummary } from "../engines/index.js";
+import { resolveActiveEngine, describeActiveEngine, engineKeyVisibility, engineUsesModelPicker, engineModelSummary, hasAnyUsableEngine } from "../engines/index.js";
 import { diffWords } from "../lib/diff.js";
 import { ModelPicker } from "./components/ModelPicker.js";
 import { fillStyleSelect, renderModelChip, managerItem } from "./components/settings-ui.js";
@@ -46,6 +46,8 @@ const els = {
   openOptionsLocal: $("open-options-local"),
   groqApiKey: $("groq-api-key"),
   groqKeyToggle: $("groq-key-toggle"),
+  openaicompatHint: $("openaicompat-hint"),
+  openOptionsOpenAICompat: $("open-options-openaicompat"),
   apiKey: $("api-key"),
   keyToggle: $("key-toggle"),
   saveKey: $("save-key"),
@@ -281,12 +283,12 @@ function openPicker() {
 
 /* ── First-run / fallback ────────────────────────────────────────────── */
 async function reflectKeyState() {
-  const { apiKey, groqApiKey } = await storage.get(["apiKey", "groqApiKey"]);
-  // Show the setup card only when there's no way to run: no key of any kind AND
-  // no usable on-device engine. A free Groq key (or on-device) is enough; don't
-  // demand an OpenRouter key from a user who set up a free engine.
-  const onDeviceOk = await isOnDeviceUsable();
-  popup.classList.toggle("no-key", !apiKey && !groqApiKey && !onDeviceOk);
+  const { apiKey } = await storage.get(["apiKey"]);
+  // Show the setup card only when there's no way to run: no usable engine at
+  // all (on-device, Groq key, OpenRouter key, or OpenAI-compatible configured).
+  // A user who set up on-device, Groq, or their own OpenAI-compatible
+  // provider must not see "Add your OpenRouter API key" — they don't need one.
+  popup.classList.toggle("no-key", !(await hasAnyUsableEngine()));
   if (apiKey) els.apiKey.value = apiKey;
 }
 
@@ -331,6 +333,7 @@ function reflectEngineFields(engine) {
   if (els.groqKeyBlock) els.groqKeyBlock.style.display = vis.groq ? "" : "none";
   if (els.openrouterKeySection) els.openrouterKeySection.style.display = vis.openrouter ? "" : "none";
   if (els.localHint) els.localHint.style.display = engine === "local" ? "" : "none";
+  if (els.openaicompatHint) els.openaicompatHint.style.display = engine === "openaicompat" ? "" : "none";
   updateModelSection(engine);
 }
 
@@ -347,6 +350,10 @@ async function updateModelSection(engine) {
   if (engine === "local") {
     const { localModel } = await storage.get(["localModel"]);
     text = localModel ? `${localModel} · local server` : "Set a model in the Local server settings";
+  }
+  if (engine === "openaicompat") {
+    const { openaiCompatModel } = await storage.get(["openaiCompatModel"]);
+    text = openaiCompatModel ? `${openaiCompatModel} · OpenAI-compatible` : "Set a model in the OpenAI-compatible settings";
   }
   els.modelReadonly.textContent = text;
   els.modelReadonly.style.display = "";
@@ -445,6 +452,7 @@ async function init() {
     refreshChip();
   });
   els.openOptionsLocal.addEventListener("click", e => { e.preventDefault(); browser.runtime.openOptionsPage().catch(() => {}); });
+  if (els.openOptionsOpenAICompat) els.openOptionsOpenAICompat.addEventListener("click", e => { e.preventDefault(); browser.runtime.openOptionsPage().catch(() => {}); });
   els.groqApiKey.addEventListener("change", async () => {
     await storage.set({ groqApiKey: els.groqApiKey.value.trim() }).catch(() => {});
     updateActiveEngineLabel();

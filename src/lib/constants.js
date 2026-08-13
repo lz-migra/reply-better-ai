@@ -27,6 +27,10 @@ export const LOCAL_PRESETS = {
 };
 export const DEFAULT_LOCAL_BASE_URL = LOCAL_PRESETS.ollama.baseUrl;
 export const REQUEST_TIMEOUT_MS = 60000;
+// Generic OpenAI-compatible engine (any provider exposing /v1/chat/completions).
+// The user supplies their own base URL, API key (skipped if the server is
+// keyless, like LM Studio), and model name. See src/engines/openai-compatible.js.
+export const OPENAI_COMPAT_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 export const CUSTOM_PROMPT_PREFIX = "custom_prompt_";
 // Roughly two lines tall — enough to identify a "long message" composer
 // (Gmail, Twitter/X, LinkedIn) and skip single-line rich inputs.

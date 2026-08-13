@@ -7,6 +7,9 @@ import { describeActiveEngine, engineKeyVisibility, engineUsesModelPicker, engin
 import { listLocalModels } from "../engines/local.js";
 import { ModelPicker } from "../popup/components/ModelPicker.js";
 import { fillStyleSelect, renderModelChip, managerItem } from "../popup/components/settings-ui.js";
+import { ModelListModal } from "../popup/components/ModelListModal.js";
+import { fetchOpenAICompatibleModels } from "../engines/openai-compatible.js";
+import { NetworkError } from "../lib/errors.js";
 
 const $ = id => document.getElementById(id);
 
@@ -26,6 +29,13 @@ const els = {
   localModel: $("local-model"),
   localRefresh: $("local-refresh"),
   localStatus: $("local-status"),
+  openaicompatBaseUrl: $("openaicompat-base-url"),
+  openaicompatApiKey: $("openaicompat-api-key"),
+  openaicompatKeyToggle: $("openaicompat-key-toggle"),
+  openaicompatModel: $("openaicompat-model"),
+  openaicompatDiscover: $("openaicompat-discover"),
+  openaicompatDiscoverStatus: $("openaicompat-discover-status"),
+  openaicompatListModal: $("openaicompat-list-modal"),
   apiKey: $("api-key"),
   keyToggle: $("key-toggle"),
   saveKey: $("save-key"),
@@ -192,6 +202,75 @@ function closePicker() {
   els.pickerContainer.replaceChildren();
 }
 
+/* ── OpenAI-compatible: discover models via GET {baseUrl}/models ──────── */
+
+// User-initiated probe of the provider's /models endpoint. Off the hot path —
+// safe to spend full REQUEST_TIMEOUT_MS. Clicking outside the modal closes it.
+async function discoverOpenAICompatModels() {
+  const baseUrl = els.openaicompatBaseUrl.value.trim();
+  const apiKey = els.openaicompatApiKey.value.trim();
+  if (!baseUrl) {
+    setDiscoverStatus("Enter a base URL first.", true);
+    return;
+  }
+  els.openaicompatDiscover.disabled = true;
+  setDiscoverStatus("Fetching available models…", false);
+  let models;
+  try {
+    models = await fetchOpenAICompatibleModels(baseUrl, apiKey);
+  } catch (e) {
+    const msg = e instanceof NetworkError
+      ? `Couldn't reach the provider at ${baseUrl}. Is the URL correct, and does it expose /models? (${e.message})`
+      : `Couldn't fetch models: ${e?.message || e}`;
+    setDiscoverStatus(msg, true);
+    return;
+  } finally {
+    els.openaicompatDiscover.disabled = false;
+  }
+  if (!models.length) {
+    setDiscoverStatus("The provider returned no models (or its response didn't look like { data: [...] }).", true);
+    return;
+  }
+  setDiscoverStatus(`${models.length} model${models.length === 1 ? "" : "s"} available.`, false);
+  openOpenAICompatListModal(models);
+}
+
+function setDiscoverStatus(msg, isError) {
+  if (!els.openaicompatDiscoverStatus) return;
+  els.openaicompatDiscoverStatus.textContent = msg;
+  els.openaicompatDiscoverStatus.style.color = isError ? "var(--rb-danger, #c0392b)" : "";
+}
+
+let openaiCompatModal = null;
+function openOpenAICompatListModal(models) {
+  const overlay = els.openaicompatListModal;
+  const card = overlay.querySelector(".opt-modal-card");
+  if (!openaiCompatModal) openaiCompatModal = new ModelListModal({ overlay: card });
+  // Click on backdrop closes the modal (matches the picker-modal behavior).
+  const backdropClose = e => { if (e.target === overlay) closeOpenAICompatListModal(); };
+  overlay.addEventListener("click", backdropClose);
+  overlay._backdropClose = backdropClose;
+  openaiCompatModal.onClose = () => {
+    overlay.classList.remove("show");
+    overlay.setAttribute("aria-hidden", "true");
+  };
+  openaiCompatModal.open(models, { currentId: els.openaicompatModel.value.trim() });
+  openaiCompatModal.onUse = async model => {
+    els.openaicompatModel.value = model.id;
+    await persist({ openaiCompatModel: model.id });
+    openaiCompatModal.close();
+    setDiscoverStatus(`Now using "${model.id}".`, false);
+    updateActiveEngineLabel();
+  };
+  overlay.classList.add("show");
+  overlay.setAttribute("aria-hidden", "false");
+}
+function closeOpenAICompatListModal() {
+  els.openaicompatListModal.classList.remove("show");
+  els.openaicompatListModal.setAttribute("aria-hidden", "true");
+  openaiCompatModal?.close();
+}
+
 // Settings nav behaves as real tabs: clicking shows that card and hides the
 // rest. (It used to scroll-spy one long page, but bottom sections couldn't
 // reach the top under the sticky header, so clicks felt dead — issue #3.)
@@ -227,6 +306,10 @@ async function updateModelSection(engine) {
   if (engine === "local") {
     const m = els.localModel?.value || (await storage.get(["localModel"])).localModel;
     text = m ? `${m} · local server` : "Set a model in the Local server tab";
+  }
+  if (engine === "openaicompat") {
+    const m = els.openaicompatModel?.value || (await storage.get(["openaiCompatModel"])).openaiCompatModel;
+    text = m ? `${m} · OpenAI-compatible` : "Set a model in the OpenAI-compatible tab";
   }
   els.modelReadonly.textContent = text;
   els.modelReadonly.style.display = "";
@@ -285,6 +368,7 @@ async function init() {
   const data = await storage.get([
     "apiKey", "groqApiKey", "engine", "model", "savedPrompts", "snippets", "enableInlineButton", "messageType", "inlineClickMode",
     "localBaseUrl", "localModel", "localPreset",
+    "openaiCompatBaseUrl", "openaiCompatApiKey", "openaiCompatModel",
   ]);
   state.savedPrompts = Array.isArray(data.savedPrompts) ? data.savedPrompts : [];
   state.snippets = Array.isArray(data.snippets) ? data.snippets : [];
@@ -294,6 +378,9 @@ async function init() {
   reflectEngineKeyFields(els.engineSelect.value);
   if (data.groqApiKey) els.groqApiKey.value = data.groqApiKey;
   els.localBaseUrl.value = data.localBaseUrl || "";
+  els.openaicompatBaseUrl.value = data.openaiCompatBaseUrl || "";
+  if (data.openaiCompatApiKey) els.openaicompatApiKey.value = data.openaiCompatApiKey;
+  els.openaicompatModel.value = data.openaiCompatModel || "";
   highlightPreset(data.localPreset || presetFromUrl(data.localBaseUrl || ""));
   if (data.localBaseUrl) refreshLocalModels();
   else els.localStatus.textContent = "Enter a base URL to connect.";
@@ -356,6 +443,11 @@ async function init() {
   });
   els.localModel.addEventListener("change", () => { if (els.localModel.value) persist({ localModel: els.localModel.value }); });
   els.localRefresh.addEventListener("click", () => refreshLocalModels({ persistSelection: true }));
+  els.openaicompatBaseUrl.addEventListener("change", () => { persist({ openaiCompatBaseUrl: els.openaicompatBaseUrl.value.trim() }); updateActiveEngineLabel(); });
+  els.openaicompatApiKey.addEventListener("change", () => { persist({ openaiCompatApiKey: els.openaicompatApiKey.value.trim() }); updateActiveEngineLabel(); });
+  els.openaicompatKeyToggle.addEventListener("click", () => { els.openaicompatApiKey.type = els.openaicompatApiKey.type === "password" ? "text" : "password"; });
+  els.openaicompatModel.addEventListener("change", () => { persist({ openaiCompatModel: els.openaicompatModel.value.trim() }); updateActiveEngineLabel(); });
+  els.openaicompatDiscover.addEventListener("click", discoverOpenAICompatModels);
   els.keyToggle.addEventListener("click", () => { els.apiKey.type = els.apiKey.type === "password" ? "text" : "password"; });
   els.saveKey.addEventListener("click", saveKey);
   els.openPicker.addEventListener("click", openPicker);

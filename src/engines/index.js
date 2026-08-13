@@ -4,6 +4,7 @@ import { DEFAULT_MODEL, OPENROUTER_BASE, GROQ_BASE, GROQ_DEFAULT_MODEL } from ".
 import { makeCloudEngine } from "./cloud.js";
 import { onDeviceEngine } from "./ondevice.js";
 import { makeLocalEngine } from "./local.js";
+import { makeOpenAICompatibleEngine } from "./openai-compatible.js";
 
 // Premium cloud engine: the existing OpenRouter path (model picker + Auto).
 const openrouterEngine = makeCloudEngine({
@@ -30,7 +31,18 @@ const groqEngine = makeCloudEngine({
 // Local (Ollama / LM Studio / OpenAI-compatible): opt-in, keyless, user-run.
 const localEngine = makeLocalEngine();
 
-export const ENGINES = { ondevice: onDeviceEngine, groq: groqEngine, openrouter: openrouterEngine, local: localEngine };
+// Generic OpenAI-compatible (custom base URL + model + optional key). Same
+// shape as the Local engine configuration-wise but routes through the cloud;
+// opt-in only (never auto-selected) so users explicitly choose this engine.
+const openaiCompatEngine = makeOpenAICompatibleEngine();
+
+export const ENGINES = {
+  ondevice: onDeviceEngine,
+  groq: groqEngine,
+  openrouter: openrouterEngine,
+  local: localEngine,
+  openaicompat: openaiCompatEngine,
+};
 
 // Pure: pick the engine id from already-gathered inputs (unit-testable). Local
 // is reachable only via an explicit setting (the line below) — it is never
@@ -52,21 +64,23 @@ export function engineKeyVisibility(engine) {
     case "local": return { groq: false, openrouter: false }; // keyless; configured in the Local server card
     case "groq": return { groq: true, openrouter: false };
     case "openrouter": return { groq: false, openrouter: true };
+    case "openaicompat": return { groq: false, openrouter: false }; // configured in the OpenAI-compatible card
     default: return { groq: true, openrouter: true }; // auto / unknown
   }
 }
 
 // Pure: whether the OpenRouter model picker is relevant for a chosen engine.
-// on-device, Groq, and local each use their own fixed/own-configured model, so
-// the Model section shows a read-only summary for them instead of the picker;
-// OpenRouter (and Auto, which may route to it) show the picker.
+// on-device, Groq, local, and openaicompat each use their own configured
+// model, so the Model section shows a read-only summary for them instead of
+// the picker; OpenRouter (and Auto, which may route to it) show the picker.
 export function engineUsesModelPicker(engine) {
-  return engine !== "ondevice" && engine !== "groq" && engine !== "local";
+  return engine !== "ondevice" && engine !== "groq" && engine !== "local" && engine !== "openaicompat";
 }
 
 // Pure: read-only label of the model a fixed-model engine uses, for the Model
 // section when there's no picker. Returns null for picker engines (openrouter /
-// auto). The local engine's model is dynamic, so it's resolved by the caller.
+// auto). The local + openaicompat engines have dynamic models, so they're
+// resolved by the caller.
 export function engineModelSummary(engine) {
   switch (engine) {
     case "ondevice": return "Gemini Nano · runs on your device";
@@ -81,9 +95,26 @@ export async function isOnDeviceUsable() {
   return ENGINES.ondevice ? (await ENGINES.ondevice.availability()) !== "unsupported" : false;
 }
 
+// True when ANY engine is usable right now. Used by the popup/options first-run
+// gate: there's no point nagging for an OpenRouter key if the user already
+// configured on-device, Groq, local, or OpenAI-compatible. Includes the
+// openaicompat engine so users who picked a custom provider don't see the
+// "Add your OpenRouter API key" banner.
+export async function hasAnyUsableEngine() {
+  if (await isOnDeviceUsable()) return true;
+  const data = await storage.get(["groqApiKey", "apiKey", "openaiCompatBaseUrl", "openaiCompatModel"]);
+  if (data.groqApiKey) return true;
+  if (data.apiKey) return true;
+  // Local only needs a base URL; openaicompat needs base URL + model.
+  if (data.openaiCompatBaseUrl && data.openaiCompatModel) return true;
+  return false;
+}
+
 // Active engine first, then the other usable engines as fallbacks (on-device,
 // then Groq, then OpenRouter — skipping unusable ones and the active dupe). The
 // caller tries each until one succeeds, so a dead free engine recovers silently.
+// openaicompat is opt-in only (never an Auto fallback) — it's only tried when
+// the user picked it explicitly.
 export async function orderedEngines() {
   const active = await resolveActiveEngine();
   const { groqApiKey, apiKey } = await storage.get(["groqApiKey", "apiKey"]);
@@ -93,6 +124,9 @@ export async function orderedEngines() {
   add(ENGINES.ondevice, onDeviceAvail === "ready" || onDeviceAvail === "downloadable");
   add(ENGINES.groq, !!groqApiKey);
   add(ENGINES.openrouter, !!apiKey);
+  if (active === ENGINES.openaicompat && (await ENGINES.openaicompat.availability()) === "ready") {
+    add(ENGINES.openaicompat, true);
+  }
   return chain;
 }
 
