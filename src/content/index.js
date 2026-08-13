@@ -24,6 +24,11 @@ const settings = { ...DEFAULT_SETTINGS };
 let activeField = null;
 let transport = null;
 let storage = null;
+// Chrome clears the page selection before showing the native context menu, so
+// by the time our onMessage handler fires, window.getSelection() is empty.
+// We capture the selection on `contextmenu` (last chance to see it) and use
+// it when the menu item is clicked.
+let lastContextMenu = null; // { field, selectedText, at }
 
 export async function bootstrap({ transport: t, storage: s }) {
   transport = t;
@@ -35,6 +40,7 @@ export async function bootstrap({ transport: t, storage: s }) {
   document.addEventListener("blur", handleBlur, true);
   document.addEventListener("input", handleInput, true);
   document.addEventListener("selectionchange", handleSelectionChange);
+  document.addEventListener("contextmenu", handleContextMenu, true);
   window.addEventListener("scroll", handleReposition, true);
   window.addEventListener("resize", handleReposition);
 
@@ -168,32 +174,52 @@ function openPanelFor(field, mode) {
 }
 
 // Triggered by the right-click context menu ("Help me write or rewrite").
-// Resolves the field from the current page selection first (the user just
-// right-clicked on the text they want rewritten), then falls back to the
-// focused field, then to document.activeElement. If we find a field with a
-// non-collapsed selection inside it, the panel is opened in "selection"
-// mode and on insert replaces ONLY the selected range — so the user's
-// surrounding text is preserved. Without a selection inside an editable
-// field, fall back to the existing whole-field improve flow.
+// Primary source is `lastContextMenu` (captured on the contextmenu event,
+// before Chrome collapses the selection); fallbacks are the live selection,
+// the active field, and finally document.activeElement. If a non-collapsed
+// selection was captured inside an editable field, the panel opens in
+// "selection" mode and on Insert replaces ONLY that range.
 function openFromContextMenu(selectionText) {
-  let field = editableFromSelection();
-  if (!field || !field.isConnected) field = activeField;
+  let field = null;
+  let capturedSelection = null;
+  // Snapshot is fresh only for a short window — beyond a few seconds the
+  // snapshot's field may have moved out of the DOM and the user's intent
+  // (right-clicking this other field) is no longer represented by it.
+  const SNAPSHOT_TTL_MS = 5000;
+  if (lastContextMenu && Date.now() - lastContextMenu.at <= SNAPSHOT_TTL_MS) {
+    if (lastContextMenu.field.isConnected) {
+      field = lastContextMenu.field;
+      capturedSelection = lastContextMenu.selectedText;
+    }
+  }
+  if (!field || !isTextInput(field)) {
+    field = editableFromSelection();
+    if (field) {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) capturedSelection = sel.toString();
+    }
+  }
+  if (!field || !field.isConnected || !isTextInput(field)) field = activeField;
   if (!field || !field.isConnected || !isTextInput(field)) {
     const el = document.activeElement;
     if (isTextInput(el)) field = el;
   }
   if (!field || !field.isConnected) {
-    console.warn("[content] openFromContextMenu: no editable field resolved. selection=", (selectionText || "").length, "chars");
+    console.warn("[content] openFromContextMenu: no editable field resolved. selection=", (selectionText || capturedSelection || "").length, "chars");
     showToast("Right-click inside a text field, or select the text you want rewritten.", { type: "info" });
     return;
   }
   activeField = field;
-  const sel = window.getSelection();
-  const insideSelection = sel && !sel.isCollapsed && sel.anchorNode
-    && (field === sel.anchorNode || field.contains(sel.anchorNode))
-    && (field === sel.focusNode || field.contains(sel.focusNode));
-  if (insideSelection) {
-    openPanelForSelection(field, selectionText || sel.toString());
+  // Re-establish the user's selection inside the field so the panel sees it
+  // and so replaceSelection() has the right range to swap.
+  const textToRewrite = capturedSelection || selectionText;
+  if (textToRewrite && field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") {
+    const current = readText(field);
+    const idx = current ? current.indexOf(textToRewrite) : -1;
+    if (idx >= 0) selectRange(field, idx, idx + textToRewrite.length);
+  }
+  if (textToRewrite) {
+    openPanelForSelection(field, textToRewrite);
     return;
   }
   const mode = detectMode(field);
@@ -202,6 +228,35 @@ function openFromContextMenu(selectionText) {
   setButtonVisible(true);
   positionButton(field);
   openPanelFor(field, mode);
+}
+
+// Restore the user's selection by character offset inside a contentEditable
+// host. For <input>/<textarea> the caller should use setSelectionRange
+// directly so the native caret state is preserved.
+function selectRange(field, start, end) {
+  if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
+    try { field.setSelectionRange(start, end); } catch {}
+    return;
+  }
+  const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+  let remaining = start;
+  let startNode = null, startOffset = 0, endNode = null, endOffset = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const len = node.nodeValue.length;
+    if (!startNode && remaining <= len) { startNode = node; startOffset = remaining; }
+    if (remaining + len >= end) { endNode = node; endOffset = end - remaining; break; }
+    remaining += len;
+    node = walker.nextNode();
+  }
+  if (!startNode || !endNode) return;
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  sel.removeAllRanges();
+  sel.addRange(range);
 }
 
 // Same as openPanelFor but for an in-field selection: the panel drafts a
@@ -253,6 +308,28 @@ function replaceSelection(field, value) {
   }
   // contentEditable: writeText already replaces the live selection via execCommand.
   writeText(field, value);
+}
+
+// Capture the page selection + its owning editable field at the moment the user
+// right-clicks. Chrome collapses the selection before showing the native menu,
+// so by the time our onMessage fires, window.getSelection() is empty and the
+// only signal we have is info.selectionText from the SW — but that loses the
+// owning field. Snapshotting here preserves both.
+function handleContextMenu(event) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+  const text = sel.toString();
+  if (!text.trim()) return;
+  const node = sel.anchorNode;
+  if (!node) return;
+  let el = node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== document.body) {
+    if (isTextInput(el)) {
+      lastContextMenu = { field: el, selectedText: text, at: Date.now() };
+      return;
+    }
+    el = el.parentElement;
+  }
 }
 
 async function improveInstant(field) {
