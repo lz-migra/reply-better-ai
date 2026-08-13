@@ -154,8 +154,9 @@ function onButtonClick() {
 }
 
 function openPanelFor(field, mode) {
-  const button = getButton();
-  if (!button) return;
+  // ensureButton before the null-check so the context-menu flow works even
+  // when the user never focused the field (no inline button was created yet).
+  const button = ensureButton(onButtonClick);
   const previous = readText(field);
   openPanel({
     anchorButton: button,
@@ -194,6 +195,7 @@ function openFromContextMenu(selectionText) {
       capturedSelection = lastContextMenu.selectedText;
     }
   }
+  console.log("[content] openFromContextMenu: snapshot=", lastContextMenu ? { field: lastContextMenu.field?.tagName, sel: lastContextMenu.selectedText.length + " chars", age: Date.now() - lastContextMenu.at + "ms" } : null);
   if (!field || !isEditableForMenu(field)) {
     field = editableFromSelection();
     if (field) {
@@ -265,9 +267,7 @@ function selectRange(field, start, end) {
 // rewrite for the selected text only, and on Insert replaces the selection
 // (not the whole field).
 function openPanelForSelection(field, selectedText) {
-  const button = getButton();
-  if (!button) return;
-  ensureButton(onButtonClick);
+  const button = ensureButton(onButtonClick);
   setButtonMode("improve");
   setButtonVisible(true);
   positionButton(field);
