@@ -43,9 +43,56 @@ export function readText(element) {
 
 export function writeText(element, value) {
   if (element.tagName === "TEXTAREA" || element.tagName === "INPUT") {
-    element.value = value;
-  } else {
-    element.innerText = value;
+    // React, Vue, Angular and other virtual-DOM frameworks install their own
+    // `value` setter on the element instance to track changes. Assigning
+    // `element.value = …` writes through that tracked setter, which means the
+    // framework's internal state never updates — the next keystroke or focus
+    // event restores the old value from the framework's state. Bypass the
+    // instance setter by invoking the prototype's native setter directly; the
+    // assignment is then indistinguishable from user input.
+    const proto = element.tagName === "TEXTAREA"
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(element, value);
+    else element.value = value;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return;
   }
-  element.dispatchEvent(new Event("input", { bubbles: true }));
+  if (element.isContentEditable) {
+    // Rich-text editors (Gmail, Notion, Twitter/X, LinkedIn) maintain their
+    // own DOM and undo stack. Writing innerText directly would wipe internal
+    // structure and break Ctrl+Z. execCommand("insertText", …) is deprecated
+    // but still the only path that integrates with the browser's native undo
+    // buffer — same trick Grammarly and LanguageTool use.
+    element.focus();
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    let ok = false;
+    try { ok = document.execCommand("insertText", false, value); }
+    catch { /* falls through to the InputEvent path */ }
+    if (!ok) {
+      // Modern replacement for the deprecated path: dispatch a synthesized
+      // InputEvent with inputType "insertText", which Chromium routes through
+      // the same editable-region pipeline as a real keystroke. In environments
+      // without InputEvent (tests, very old browsers) fall back to a plain Event
+      // with the same inputType attached as a property.
+      let ev;
+      try {
+        ev = new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: value });
+      } catch {
+        ev = new Event("input", { bubbles: true, cancelable: true });
+        ev.inputType = "insertText";
+        ev.data = value;
+      }
+      element.dispatchEvent(ev);
+    }
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 }

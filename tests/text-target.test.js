@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { isTextInput, isImproveTarget } from "../src/content/text-target.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { isTextInput, isImproveTarget, writeText } from "../src/content/text-target.js";
 
 function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, spellcheck, height, disabled, readOnly } = {}) {
   return {
@@ -101,5 +101,142 @@ describe("isImproveTarget", () => {
     expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", disabled: true }))).toBe(false);
     expect(isImproveTarget(makeElement({ tagName: "INPUT", type: "text", readOnly: true }))).toBe(false);
     expect(isImproveTarget(makeElement({ tagName: "DIV", isContentEditable: true, disabled: true }))).toBe(false);
+  });
+});
+
+// writeText runs in the page's main world: it touches `window.HTMLInputElement`,
+// `window.HTMLTextAreaElement`, `document.execCommand`, and the page's
+// selection object. We stub the host once per test rather than pull in jsdom.
+function installDomStubs({ execCommandReturn = true, execCommandThrows = false } = {}) {
+  const dispatchLog = [];
+  const nativeInputSetter = vi.fn(function (v) { this._value = v; });
+  const nativeTextareaSetter = vi.fn(function (v) { this._value = v; });
+  const htmlInputElement = { prototype: {} };
+  const htmlTextAreaElement = { prototype: {} };
+  Object.defineProperty(htmlInputElement.prototype, "value", {
+    configurable: true, set: nativeInputSetter, get() { return this._value; },
+  });
+  Object.defineProperty(htmlTextAreaElement.prototype, "value", {
+    configurable: true, set: nativeTextareaSetter, get() { return this._value; },
+  });
+  const execCommand = vi.fn(() => {
+    if (execCommandThrows) throw new Error("disabled");
+    return execCommandReturn;
+  });
+  const selection = {
+    removeAllRanges: vi.fn(), addRange: vi.fn(),
+  };
+  const range = { selectNodeContents: vi.fn() };
+  const getSelection = vi.fn(() => selection);
+  globalThis.window = {
+    HTMLInputElement: htmlInputElement,
+    HTMLTextAreaElement: htmlTextAreaElement,
+    getSelection,
+  };
+  globalThis.document = {
+    createRange: () => range,
+    execCommand,
+    getSelection,
+  };
+  return { dispatchLog, nativeInputSetter, nativeTextareaSetter, execCommand, selection, range, getSelection };
+}
+
+describe("writeText — input / textarea", () => {
+  beforeEach(() => { installDomStubs(); });
+  afterEach(() => { delete globalThis.window; delete globalThis.document; });
+
+  function makeFormField(tagName) {
+    const events = [];
+    const el = {
+      tagName,
+      type: "text",
+      _value: "",
+      get value() { return this._value; },
+      dispatchEvent(ev) { events.push(ev.type); return true; },
+    };
+    return { el, events };
+  }
+
+  it("writes through the prototype's native value setter for <input>", () => {
+    const { el, events } = makeFormField("INPUT");
+    const stubs = installDomStubs();
+    writeText(el, "hello");
+    expect(stubs.nativeInputSetter).toHaveBeenCalledWith("hello");
+    expect(el._value).toBe("hello");
+    expect(events).toContain("input");
+    expect(events).toContain("change");
+  });
+
+  it("writes through the prototype's native value setter for <textarea>", () => {
+    const { el, events } = makeFormField("TEXTAREA");
+    const stubs = installDomStubs();
+    writeText(el, "world");
+    expect(stubs.nativeTextareaSetter).toHaveBeenCalledWith("world");
+    expect(el._value).toBe("world");
+    expect(events).toContain("input");
+    expect(events).toContain("change");
+  });
+
+  it("falls back to element.value when the prototype setter is missing", () => {
+    const events = [];
+    const el = {
+      tagName: "INPUT", type: "text", _value: "",
+      set value(v) { this._value = v; },
+      get value() { return this._value; },
+      dispatchEvent(ev) { events.push(ev.type); return true; },
+    };
+    globalThis.window.HTMLInputElement = { prototype: {} }; // no setter
+    writeText(el, "fallback");
+    expect(el._value).toBe("fallback");
+  });
+});
+
+describe("writeText — contentEditable", () => {
+  afterEach(() => { delete globalThis.window; delete globalThis.document; });
+
+  function makeEditable({ execCommandOk = true, execCommandThrows = false } = {}) {
+    installDomStubs({ execCommandReturn: execCommandOk, execCommandThrows });
+    const events = [];
+    const el = {
+      tagName: "DIV",
+      isContentEditable: true,
+      focus: vi.fn(),
+      innerText: "",
+      dispatchEvent(ev) {
+        events.push({ type: ev.type, data: ev.data ?? null, inputType: ev.inputType ?? null });
+        return true;
+      },
+    };
+    return { el, events };
+  }
+
+  it("uses execCommand insertText and dispatches input event", () => {
+    const { el, events } = makeEditable({ execCommandOk: true });
+    writeText(el, "rich text");
+    expect(el.focus).toHaveBeenCalled();
+    expect(globalThis.document.execCommand).toHaveBeenCalledWith("insertText", false, "rich text");
+    expect(events.some(e => e.type === "input")).toBe(true);
+  });
+
+  it("selects the entire content before inserting", () => {
+    const { el } = makeEditable();
+    writeText(el, "x");
+    expect(globalThis.document.createRange().selectNodeContents).toHaveBeenCalledWith(el);
+    expect(globalThis.window == null).toBe(false); // selection helpers invoked via document.getSelection
+  });
+
+  it("falls back to InputEvent when execCommand returns false", () => {
+    const { el, events } = makeEditable({ execCommandOk: false });
+    writeText(el, "modern path");
+    const insert = events.find(e => e.type === "input" && e.inputType === "insertText");
+    expect(insert).toBeTruthy();
+    expect(insert.data).toBe("modern path");
+  });
+
+  it("falls back to InputEvent when execCommand throws (deprecated/disabled)", () => {
+    const { el, events } = makeEditable({ execCommandThrows: true });
+    writeText(el, "still ok");
+    const insert = events.find(e => e.type === "input" && e.inputType === "insertText");
+    expect(insert).toBeTruthy();
   });
 });
