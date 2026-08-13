@@ -68,6 +68,24 @@ browser.runtime.onConnect.addListener(port => {
   });
 });
 
+const CONTEXT_MENU_ID = "rb-help-write";
+
+async function registerContextMenu() {
+  // Context menus are cleared on every service-worker restart in Chrome MV3;
+  // recreate on both onInstalled (covers updates) and onStartup (covers browser
+  // restart). removeAll() first so re-registrations don't throw on the duplicate id.
+  try {
+    await browser.contextMenus.removeAll();
+    browser.contextMenus.create({
+      id: CONTEXT_MENU_ID,
+      title: "Help me write or rewrite",
+      contexts: ["selection", "editable"],
+    });
+  } catch (e) {
+    console.warn("[bg] contextMenus.create failed:", e?.message);
+  }
+}
+
 browser.runtime.onInstalled.addListener(async details => {
   await migrateFromSync();
   if (details.reason === "install") {
@@ -78,15 +96,34 @@ browser.runtime.onInstalled.addListener(async details => {
     if (Object.keys(defaults).length > 0) await storage.set(defaults);
     browser.runtime.openOptionsPage().catch(err => console.warn("openOptionsPage:", err.message));
   }
+  await registerContextMenu();
   await runStartupValidation();
 });
 
 if (browser.runtime.onStartup) {
   browser.runtime.onStartup.addListener(async () => {
     await migrateFromSync();
+    await registerContextMenu();
     await runStartupValidation();
   });
 }
+
+// Forward a context-menu click to the content script of the tab where it fired.
+// The content script owns activeField/panel state; the worker only routes the
+// trigger. If the content script can't be reached (chrome:// pages, store,
+// before load), fail silently — the user already saw a native context menu.
+browser.contextMenus?.onClicked?.addListener?.(async (info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) return;
+  console.log("[bg] context menu clicked on tab", tab.id, "frameId:", info.frameId, "selection:", (info.selectionText || "").length, "chars");
+  try {
+    await browser.tabs.sendMessage(tab.id, {
+      action: "openFromContextMenu",
+      selectionText: info.selectionText || "",
+    });
+  } catch (e) {
+    console.warn("[bg] context menu: content script unreachable:", e?.message);
+  }
+});
 
 async function runStartupValidation() {
   let model;
