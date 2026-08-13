@@ -1,5 +1,5 @@
 import browser from "../lib/browser.js";
-import { isTextInput, isImproveTarget, readText, writeText } from "./text-target.js";
+import { isTextInput, isImproveTarget, isEditableForMenu, readText, writeText } from "./text-target.js";
 import {
   injectStyles, ensureButton, getButton, setButtonMode, setButtonVisible,
   setButtonLoading, positionButton, removeButton, showToast,
@@ -134,7 +134,7 @@ function editableFromSelection() {
   if (!node) return null;
   let el = node.nodeType === 3 ? node.parentElement : node;
   while (el && el !== document.body) {
-    if (isTextInput(el)) return el;
+    if (isEditableForMenu(el)) return el;
     el = el.parentElement;
   }
   return null;
@@ -192,17 +192,17 @@ function openFromContextMenu(selectionText) {
       capturedSelection = lastContextMenu.selectedText;
     }
   }
-  if (!field || !isTextInput(field)) {
+  if (!field || !isEditableForMenu(field)) {
     field = editableFromSelection();
     if (field) {
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) capturedSelection = sel.toString();
     }
   }
-  if (!field || !field.isConnected || !isTextInput(field)) field = activeField;
-  if (!field || !field.isConnected || !isTextInput(field)) {
+  if (!field || !field.isConnected || !isEditableForMenu(field)) field = activeField;
+  if (!field || !field.isConnected || !isEditableForMenu(field)) {
     const el = document.activeElement;
-    if (isTextInput(el)) field = el;
+    if (isEditableForMenu(el)) field = el;
   }
   if (!field || !field.isConnected) {
     console.warn("[content] openFromContextMenu: no editable field resolved. selection=", (selectionText || capturedSelection || "").length, "chars");
@@ -324,7 +324,7 @@ function handleContextMenu(event) {
   if (!node) return;
   let el = node.nodeType === 3 ? node.parentElement : node;
   while (el && el !== document.body) {
-    if (isTextInput(el)) {
+    if (isEditableForMenu(el)) {
       lastContextMenu = { field: el, selectedText: text, at: Date.now() };
       return;
     }

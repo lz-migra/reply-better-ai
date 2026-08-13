@@ -36,6 +36,25 @@ export function isImproveTarget(element) {
   return isTextInput(element);
 }
 
+// Same as isTextInput but ignores spellcheck="false". Used by the context-menu
+// flow: the user explicitly chose "Help me write or rewrite" from Chrome's own
+// menu, which overrides the page author's spellcheck opt-out. Disabled and
+// readOnly remain hard blocks (we genuinely can't write there). Without this
+// distinction, surfaces like Google search (textarea with spellcheck="false"
+// because they handle their own grammar suggestions) would refuse every menu
+// invocation, defeating the point of the feature.
+export function isEditableForMenu(element) {
+  if (!element || typeof element.tagName !== "string") return false;
+  if (element.disabled || element.readOnly) return false;
+  const tag = element.tagName;
+  if (tag === "TEXTAREA") return true;
+  if (tag === "INPUT") {
+    const t = (element.type || "text").toLowerCase();
+    return !EXCLUDED_INPUT_TYPES.has(t);
+  }
+  return element.isContentEditable === true;
+}
+
 export function readText(element) {
   if (element.tagName === "TEXTAREA" || element.tagName === "INPUT") return element.value;
   return element.innerText;

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { isTextInput, isImproveTarget, writeText } from "../src/content/text-target.js";
+import { isTextInput, isImproveTarget, isEditableForMenu, writeText } from "../src/content/text-target.js";
 
 function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, spellcheck, height, disabled, readOnly } = {}) {
   return {
@@ -101,6 +101,24 @@ describe("isImproveTarget", () => {
     expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", disabled: true }))).toBe(false);
     expect(isImproveTarget(makeElement({ tagName: "INPUT", type: "text", readOnly: true }))).toBe(false);
     expect(isImproveTarget(makeElement({ tagName: "DIV", isContentEditable: true, disabled: true }))).toBe(false);
+  });
+});
+
+describe("isEditableForMenu (context-menu flow)", () => {
+  it("accepts surfaces that spellcheck=\"false\" rejects — explicit user opt-in overrides", () => {
+    expect(isEditableForMenu(makeElement({ tagName: "TEXTAREA", spellcheck: "false" }))).toBe(true);
+    expect(isEditableForMenu(makeElement({ tagName: "INPUT", type: "text", spellcheck: "false" }))).toBe(true);
+    expect(isEditableForMenu(makeElement({ tagName: "DIV", isContentEditable: true, spellcheck: "false" }))).toBe(true);
+  });
+
+  it("still rejects disabled and readOnly surfaces", () => {
+    expect(isEditableForMenu(makeElement({ tagName: "TEXTAREA", disabled: true }))).toBe(false);
+    expect(isEditableForMenu(makeElement({ tagName: "INPUT", type: "text", readOnly: true }))).toBe(false);
+  });
+
+  it("still rejects excluded input types and non-editable divs", () => {
+    expect(isEditableForMenu(makeElement({ tagName: "INPUT", type: "password" }))).toBe(false);
+    expect(isEditableForMenu(makeElement({ tagName: "DIV" }))).toBe(false);
   });
 });
 
