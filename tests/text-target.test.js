@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { isTextInput, isImproveTarget } from "../src/content/text-target.js";
 
-function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, spellcheck, height } = {}) {
+function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, spellcheck, height, disabled, readOnly } = {}) {
   return {
     tagName,
     type,
     contentEditable,
     isContentEditable,
+    disabled: !!disabled,
+    readOnly: !!readOnly,
     getAttribute(name) {
       if (name === "aria-multiline") return ariaMultiline ?? null;
       if (name === "spellcheck") return spellcheck ?? null;
@@ -30,7 +32,6 @@ describe("isTextInput", () => {
 
   it("accepts contentEditable hosts", () => {
     expect(isTextInput(makeElement({ tagName: "DIV", isContentEditable: true }))).toBe(true);
-    expect(isTextInput(makeElement({ tagName: "DIV", contentEditable: "true" }))).toBe(true);
   });
 
   it("rejects null / non-text inputs / non-editable divs", () => {
@@ -39,9 +40,15 @@ describe("isTextInput", () => {
     expect(isTextInput(makeElement({ tagName: "DIV" }))).toBe(false);
   });
 
-  it("rejects search/password/email/url/tel/number/date inputs", () => {
-    for (const type of ["search", "password", "email", "url", "tel", "number", "date", "color"]) {
+  it("rejects password/number/date/color and other non-text inputs", () => {
+    for (const type of ["password", "number", "date", "color", "checkbox", "radio", "file", "range", "submit", "button"]) {
       expect(isTextInput(makeElement({ tagName: "INPUT", type }))).toBe(false);
+    }
+  });
+
+  it("accepts search/email/url/tel inputs (single-line text surfaces)", () => {
+    for (const type of ["search", "email", "url", "tel"]) {
+      expect(isTextInput(makeElement({ tagName: "INPUT", type }))).toBe(true);
     }
   });
 });
@@ -56,18 +63,15 @@ describe("isImproveTarget", () => {
     expect(isImproveTarget(makeElement({ tagName: "INPUT" }))).toBe(true);
   });
 
-  it("rejects <input type=search> and other metadata inputs", () => {
-    for (const type of ["search", "password", "email", "url", "tel", "number", "date"]) {
+  it("rejects non-text <input> types", () => {
+    for (const type of ["password", "number", "date", "color", "checkbox", "radio", "file", "range"]) {
       expect(isImproveTarget(makeElement({ tagName: "INPUT", type }))).toBe(false);
     }
   });
 
-  it("accepts contenteditable unconditionally (matches native spellcheck)", () => {
+  it("accepts contenteditable unconditionally", () => {
     expect(isImproveTarget(makeElement({
       tagName: "DIV", isContentEditable: true, height: 18,
-    }))).toBe(true);
-    expect(isImproveTarget(makeElement({
-      tagName: "DIV", contentEditable: "true", height: 22,
     }))).toBe(true);
     expect(isImproveTarget(makeElement({
       tagName: "DIV", isContentEditable: true, ariaMultiline: "true", height: 80,
@@ -91,5 +95,11 @@ describe("isImproveTarget", () => {
   it("ignores spellcheck=\"true\" and spellcheck=\"default\" (treat as absent)", () => {
     expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", spellcheck: "true" }))).toBe(true);
     expect(isImproveTarget(makeElement({ tagName: "INPUT", spellcheck: "default" }))).toBe(true);
+  });
+
+  it("rejects disabled and readOnly surfaces", () => {
+    expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", disabled: true }))).toBe(false);
+    expect(isImproveTarget(makeElement({ tagName: "INPUT", type: "text", readOnly: true }))).toBe(false);
+    expect(isImproveTarget(makeElement({ tagName: "DIV", isContentEditable: true, disabled: true }))).toBe(false);
   });
 });
