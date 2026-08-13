@@ -73,7 +73,7 @@ src/
 
 The same content-tree compiles to a Tampermonkey userscript. `src/lib/transport.js` defines a transport abstraction (`createExtensionTransport` for the extension, `createUserscriptTransport` for the userscript). The content script only depends on `transport.stream({ payload, onDelta, onModel, signal })` and `transport.getSettings()`. Any new cross-runtime feature must keep that contract.
 
-The content script's auto-bootstrap reads `globalThis.__RB_TRANSPORT__` and `globalThis.__RB_STORAGE__` (set by the userscript runtime) and falls back to nothing. Without these globals, the content script doesn't start — which is the desired behaviour in the extension (the manifest `content_scripts` handles bootstrapping).
+The content script auto-bootstraps at module load: if `globalThis.__RB_TRANSPORT__` and `globalThis.__RB_STORAGE__` are set (userscript runtime), it uses them; otherwise it constructs `createExtensionTransport()` + `createStorage(chromeBackend)` inline. The `window.__RB_BOOTSTRAPPED__` flag guards against double-init. Don't add a third path — these two cover everything.
 
 ## Commands
 
@@ -140,7 +140,8 @@ These trip up new contributors more than any other category:
 - **Always clean up the port.** `port.onDisconnect` is the only reliable signal that the panel closed mid-stream. The SW must `controller.abort()` on disconnect so it doesn't keep streaming (and billing) into the void. The client must `port.disconnect()` in `finally` (or every open leaks a port in the listener chain).
 - **`storage.onChanged` listeners must be removed on `pagehide`.** Long-lived pages (Gmail, Twitter/X) otherwise accumulate listeners on every navigation. Use `{ once: true }` so the cleanup can't be forgotten.
 - **Position-against-detached-field.** `getBoundingClientRect()` of a removed field returns zeros and `(0, 0)` collapses the button. Bail on `!field.isConnected || (rect.width === 0 && rect.height === 0)`.
-- **`EXCLUDED_INPUT_TYPES`** in `src/content/text-target.js` is the drop list (search, password, email, url, tel, number, dates, file, hidden, checkbox, etc.). Don't widen it without a reason — single-line username fields shouldn't show the rewrite button.
+- **`EXCLUDED_INPUT_TYPES`** in `src/content/text-target.js` is the drop list (password, hidden, button-like, pickers, number, checkbox, radio, file, range, etc.). Single-line text inputs (`search`, `email`, `url`, `tel`) are intentionally NOT excluded — they show the rewrite button. Don't widen the list without a reason.
+- **`isTextInput` vs `isEditableForMenu`** — two slightly different gates. `isTextInput` mirrors the native spellcheck (respects `spellcheck="false"`) and gates the inline button. `isEditableForMenu` ignores `spellcheck="false"` and gates the context-menu flow — the user explicitly chose to rewrite, which overrides the page's opt-out. `disabled` and `readOnly` are hard blocks in both. Don't collapse them.
 - **Reasoning models need cleanup, not preservation.** Qwen3 / DeepSeek-R1 / GPT-OSS / Kimi-K2 emit a tagged chain-of-thought block before the user-visible reply. `cleanModelOutput` deliberately strips every variant (`<think>...</think>`, `<|reasoning|>...</|/reasoning|>`, `<reasoning>...</reasoning>`, `<thought>...</thought>`). Don't "fix" the sanitizer to keep reasoning, even if a specific model "should" handle it.
 
 ## CSS prefix
@@ -150,6 +151,26 @@ These trip up new contributors more than any other category:
 - `mp-` — model picker internal classes.
 
 No `!important` unless a host page would otherwise win.
+
+## Context-menu flow
+
+The right-click "Help me write or rewrite" entry is registered in `src/background/service-worker.js` (`registerContextMenu()` on `onInstalled` + `onStartup`; Chrome MV3 keeps the menu across SW restarts). The SW click handler forwards via `tabs.sendMessage` to the content script, which runs `openFromContextMenu(selectionText)`.
+
+Five gotchas that bit us in production:
+
+1. **Chrome collapses `window.getSelection()` before showing the native menu**, so by the time our onMessage fires the selection is empty. We capture the right-click target on a capture-phase `contextmenu` listener (`handleContextMenu`) and store `{ field, selectedText, at }` in `lastContextMenu`. The snapshot expires after 5s so stale captures don't win against a fresh click.
+2. **Sites like Google re-focus and collapse the selection in their own contextmenu handlers**, so `selectedText` may be empty even when the user clicked on a textarea with text in it. Capture `event.target` (the field) unconditionally; treat the selection as optional.
+3. **Don't filter by `spellcheck="false"` in the context-menu path** — use `isEditableForMenu`, not `isTextInput`. Google's search `<textarea>` sets `spellcheck="false"` because it handles its own grammar. That opt-out is for the inline button, not a veto on explicit user actions from Chrome's own menu.
+4. **Always `ensureButton` before any `openPanel` call** — the inline button may not exist yet (the user never focused the field). `ensureButton` is idempotent; `getButton` returning `null` causes silent aborts that look like "menu does nothing".
+5. **Selection-mode vs whole-field-mode.** If the snapshot captured a non-empty `selectedText`, `openPanelForSelection` opens the panel with `draft: selectedText` and on Insert replaces only that range (preserves surrounding text; undo restores the original selection). Otherwise `openPanelFor` improves the whole field.
+
+## Writing text — React/Vue, rich-text editors, undo buffer
+
+`writeText` in `src/content/text-target.js` has to look like a real keystroke or the receiving app rejects the change silently. Three layers, with a fallback each:
+
+- **`<input>` / `<textarea>`:** Use the prototype's native `value` setter (`HTMLInputElement.prototype` / `HTMLTextAreaElement.prototype`), not `element.value = …`. React, Vue and Angular install their own tracked setter on the element instance to mirror the value into their virtual DOM; bypassing it via the prototype setter updates the framework's state as if the user had typed. Also dispatch both `input` and `change`.
+- **contentEditable — preferred:** `document.execCommand("insertText", …)`. Deprecated in the spec but still the only path that integrates with the browser's native undo buffer so `Ctrl+Z` works — same trick Grammarly and LanguageTool rely on.
+- **contentEditable — fallback if execCommand returns false or throws:** Mutate the DOM directly via `range.deleteContents()` + `range.insertNode(document.createTextNode(value))` on the live selection's range (preserves the cursor). Synthesized events only notify listeners; they don't mutate, so always do the mutation first, then dispatch a synthesized `InputEvent` (`inputType: "insertText"`) so the framework sees the change. Tests + legacy browsers: fall back to a plain `Event("input", { … })` with `inputType` attached as a property.
 
 ## Diff budget
 
@@ -202,3 +223,7 @@ In order, in [`docs/coding-standards/`](./docs/coding-standards/):
 - Treating `validateApiKey` as boolean — its return is `{ ok: true } | { ok: false, reason: "invalid" | "timeout" | "network" | "provider" }`. Caller branches on `reason` to either refuse (invalid) or save and warn (timeout/network).
 - Reading the API key in the content script "just to know whether to show the button" — the content script never sees it. Use `hasAnyUsableEngine()` instead.
 - Adding inline `<script>` to popup.html or options.html to "save a round-trip" — the CSP rejects it. Bundle into the JS entry.
+- **Filtering by `spellcheck="false"` in the context-menu path** — the menu must work on Google search etc. Use `isEditableForMenu`, not `isTextInput`.
+- **Calling `getButton()` and bailing on `null` inside `openPanelFor`/`openPanelForSelection`** — silent failure. Always `ensureButton(onButtonClick)` first; it's idempotent.
+- **Trusting `window.getSelection()` in the context-menu handler** — Chrome collapses it before showing the menu. Read `event.target` and walk parents to find the editable ancestor.
+- **Trusting that the content script auto-bootstraps only when userscript globals are set** — it doesn't. In the extension build, `bootstrap()` constructs `createExtensionTransport()` + `createStorage(chromeBackend)` inline. Without that, the inline button never appears and context-menu clicks silently fail.
