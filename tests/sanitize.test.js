@@ -42,4 +42,51 @@ describe("cleanModelOutput", () => {
     expect(cleanModelOutput(null)).toBe(null);
     expect(cleanModelOutput(undefined)).toBe(undefined);
   });
+
+  it("strips a leading <think>…</think> block (Qwen3 / DeepSeek-R1 style)", () => {
+    const input = "<think>The user wants a friendlier version. Let me rewrite.</think>Hi there!\n\nWelcome aboard.";
+    expect(cleanModelOutput(input)).toBe("Hi there!\n\nWelcome aboard.");
+  });
+
+  it("strips a multiline <think> block", () => {
+    const input = "<think>\nstep 1: parse\nstep 2: rewrite\nstep 3: format\n</think>\n\nHi there!";
+    expect(cleanModelOutput(input)).toBe("Hi there!");
+  });
+
+  it("strips reasoning blocks wherever they appear (not only as a prefix)", () => {
+    const input = "Opening line.\n\n<think>internal notes</think>\n\nClosing line.";
+    // The block itself is stripped; trailing whitespace before/after is NOT
+    // trimmed by this rule (that's the job of TRAILING_OFFER / rules below).
+    expect(cleanModelOutput(input)).toBe("Opening line.\n\n\n\nClosing line.");
+  });
+
+  it("strips <|reasoning|>…</|reasoning|> (GPT-OSS / vLLM style)", () => {
+    const input = "<|reasoning|>internal notes<|/reasoning|>Hi there!";
+    expect(cleanModelOutput(input)).toBe("Hi there!");
+  });
+
+  it("strips <reasoning>…</reasoning> (some providers)", () => {
+    const input = "<reasoning>internal notes</reasoning>Hi there!";
+    expect(cleanModelOutput(input)).toBe("Hi there!");
+  });
+
+  it("strips <thought>…</thought> (Kimi / other variants)", () => {
+    const input = "<thought>internal notes</thought>Hi there!";
+    expect(cleanModelOutput(input)).toBe("Hi there!");
+  });
+
+  it("strips multiple reasoning blocks from the same response", () => {
+    const input = "<think>first<></think>real answer<think>second<></think>more answer";
+    expect(cleanModelOutput(input)).toBe("real answermore answer");
+  });
+
+  it("strips an empty <think> block (no content)", () => {
+    const input = "<think></think>Hi there!";
+    expect(cleanModelOutput(input)).toBe("Hi there!");
+  });
+
+  it("does not match an unclosed reasoning tag", () => {
+    const input = "Hello <think> world without close";
+    expect(cleanModelOutput(input)).toBe(input);
+  });
 });

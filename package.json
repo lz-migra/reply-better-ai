@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "openai": "^4.73.0",
     "webextension-polyfill": "^0.12.0"
   },
   "devDependencies": {

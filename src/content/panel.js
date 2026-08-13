@@ -53,9 +53,10 @@ export function closePanel() {
 // with {code}.
 function streamThroughWorker(payload, onDelta, onModel) {
   return new Promise((resolve, reject) => {
+    if (!browser.runtime?.id) { reject(new Error("EXT_CONTEXT_INVALIDATED")); return; }
     let port;
     try { port = browser.runtime.connect({ name: "rb-improve-stream" }); }
-    catch (e) { reject(new Error(e.message)); return; }
+    catch (e) { reject(e?.message?.includes("Extension context invalidated") ? new Error("EXT_CONTEXT_INVALIDATED") : e); return; }
     activePort = port;
     let settled = false;
     const finish = () => { if (activePort === port) activePort = null; try { port.disconnect(); } catch {} };
@@ -65,8 +66,12 @@ function streamThroughWorker(payload, onDelta, onModel) {
       else if (msg.done) { settled = true; resolve(msg.full); finish(); }
       else if (msg.error) { settled = true; const err = new Error(msg.error); err.code = msg.code; reject(err); finish(); }
     });
-    port.onDisconnect.addListener(() => { if (activePort === port) activePort = null; if (!settled) reject(new Error("The extension may be reloading. Refresh this page and try again.")); });
-    port.postMessage({ action: "stream", ...payload });
+    port.onDisconnect.addListener(() => {
+      if (activePort === port) activePort = null;
+      if (!settled) reject(new Error("EXT_CONTEXT_INVALIDATED"));
+    });
+    try { port.postMessage({ action: "stream", ...payload }); }
+    catch (e) { reject(e?.message?.includes("Extension context invalidated") ? new Error("EXT_CONTEXT_INVALIDATED") : e); finish(); }
   });
 }
 
@@ -74,13 +79,17 @@ function streamThroughWorker(payload, onDelta, onModel) {
 // directly — the host page's CSP blocks it).
 async function loadModels() {
   if (modelsState && !modelsState.error) return modelsState;
+  if (!browser.runtime?.id) {
+    modelsState = { models: [], stale: false, error: "Extension was reloaded. Refresh this page." };
+    return modelsState;
+  }
   try {
     const res = await browser.runtime.sendMessage({ action: "getModels" });
     if (res?.error) modelsState = { models: [], stale: false, error: res.error };
     else modelsState = { models: Array.isArray(res?.models) ? res.models : [], stale: !!res?.stale, error: null };
   } catch (e) {
     console.warn("[panel] getModels failed:", e?.message);
-    modelsState = { models: [], stale: false, error: e?.message || "Couldn't load models" };
+    modelsState = { models: [], stale: false, error: e?.message?.includes("Extension context invalidated") ? "Extension was reloaded. Refresh this page." : (e?.message || "Couldn't load models") };
   }
   return modelsState;
 }

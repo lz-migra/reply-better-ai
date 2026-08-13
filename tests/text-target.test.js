@@ -37,6 +37,12 @@ describe("isTextInput", () => {
     expect(isTextInput(makeElement({ tagName: "INPUT", type: "checkbox" }))).toBe(false);
     expect(isTextInput(makeElement({ tagName: "DIV" }))).toBe(false);
   });
+
+  it("rejects search/password/email/url/tel/number/date inputs", () => {
+    for (const type of ["search", "password", "email", "url", "tel", "number", "date", "color"]) {
+      expect(isTextInput(makeElement({ tagName: "INPUT", type }))).toBe(false);
+    }
+  });
 });
 
 describe("isImproveTarget", () => {
@@ -44,8 +50,13 @@ describe("isImproveTarget", () => {
     expect(isImproveTarget(makeElement({ tagName: "TEXTAREA" }))).toBe(true);
   });
 
-  it("rejects every <input> regardless of type", () => {
-    for (const type of ["text", "search", "email", "url", "tel", undefined]) {
+  it("accepts <input type=text> and <input> with no explicit type", () => {
+    expect(isImproveTarget(makeElement({ tagName: "INPUT", type: "text" }))).toBe(true);
+    expect(isImproveTarget(makeElement({ tagName: "INPUT" }))).toBe(true);
+  });
+
+  it("rejects <input type=search> and other metadata inputs", () => {
+    for (const type of ["search", "password", "email", "url", "tel", "number", "date"]) {
       expect(isImproveTarget(makeElement({ tagName: "INPUT", type }))).toBe(false);
     }
   });
