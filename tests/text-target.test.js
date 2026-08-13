@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { isTextInput, isImproveTarget } from "../src/content/text-target.js";
 
-function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, height } = {}) {
+function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable, ariaMultiline, spellcheck, height } = {}) {
   return {
     tagName,
     type,
@@ -9,6 +9,7 @@ function makeElement({ tagName = "DIV", type, contentEditable, isContentEditable
     isContentEditable,
     getAttribute(name) {
       if (name === "aria-multiline") return ariaMultiline ?? null;
+      if (name === "spellcheck") return spellcheck ?? null;
       return null;
     },
     getBoundingClientRect() {
@@ -79,5 +80,16 @@ describe("isImproveTarget", () => {
 
   it("rejects null", () => {
     expect(isImproveTarget(null)).toBe(false);
+  });
+
+  it("respects spellcheck=\"false\" on any editable surface", () => {
+    expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", spellcheck: "false" }))).toBe(false);
+    expect(isImproveTarget(makeElement({ tagName: "INPUT", type: "text", spellcheck: "false" }))).toBe(false);
+    expect(isImproveTarget(makeElement({ tagName: "DIV", isContentEditable: true, spellcheck: "false" }))).toBe(false);
+  });
+
+  it("ignores spellcheck=\"true\" and spellcheck=\"default\" (treat as absent)", () => {
+    expect(isImproveTarget(makeElement({ tagName: "TEXTAREA", spellcheck: "true" }))).toBe(true);
+    expect(isImproveTarget(makeElement({ tagName: "INPUT", spellcheck: "default" }))).toBe(true);
   });
 });
