@@ -25,8 +25,10 @@ Everything streams live, you can **Regenerate** for another take, and **Insert**
 ## Features
 
 - **Free, zero-setup engine** — on-device AI (Gemini Nano) runs locally with no key and no data leaving your computer, selected automatically when your browser supports it.
-- **Your choice of engine** — on-device, your own local [Ollama](https://ollama.com)/[LM Studio](https://lmstudio.ai) server, a free [Groq](https://console.groq.com/keys) key, or OpenRouter's 500+ models. **Auto** picks the best available and falls back across them if one is unavailable; the active engine is always shown inline and in settings.
+- **Five engines, your choice** — on-device, your own local [Ollama](https://ollama.com)/[LM Studio](https://lmstudio.ai) server, a free [Groq](https://console.groq.com/keys) key, OpenRouter's 500+ models, or any custom **OpenAI-compatible** endpoint. **Auto** picks the best available and falls back across them if one is unavailable; the active engine is always shown inline and in settings.
 - **Context-aware inline button** — morphs between Reply and Improve based on what you've selected or typed; sits in the corner of the focused field.
+- **Right-click "Help me write or rewrite"** — invoke the same panel from Chrome's context menu on any editable field, with or without a selection. Works on every writable surface, including rich-text editors and pages that disable native spellcheck.
+- **Selection-only rewriting** — select text inside any field, choose "Help me write or rewrite", and only the selected range is replaced on Insert; surrounding text is preserved.
 - **Reply to a conversation** — selection-first context capture, tone presets, summarize, or a free-form instruction in any language.
 - **Live streaming** — results type in as they're generated, in the popup and the inline panel alike.
 - **Changes diff** — word-level additions/deletions between your draft and the rewrite.
@@ -34,6 +36,7 @@ Everything streams live, you can **Regenerate** for another take, and **Insert**
 - **Dynamic model picker** — Popular / Free / All tabs, search, provider filter, context window, and live per-token pricing.
 - **Auto · Fastest free** — one pick that routes to the fastest available free model and fails over automatically when one is busy or errors (reasoning models excluded; shows which model answered).
 - **Inline model switch + recovery** — swap models without leaving the page; when a free model is rate-limited, switch and retry in one tap.
+- **Works on React, Vue, Angular, Gmail, Notion** — `writeText` uses the prototype's native value setter so framework state mirrors what you see, and `execCommand("insertText")` keeps rich-text undo (`Ctrl+Z`) intact.
 - **Writing styles** — Improve, Professional, Friendly, Concise, Persuasive — plus your own custom prompts.
 - **Snippets** — TextBlaze-style triggers (`/sig`, `/welcome`) that expand as you type in plain text fields.
 - **Dark mode** — popup and options follow your system theme.
@@ -60,8 +63,9 @@ Open the extension's settings and pick an engine, or leave it on **Auto**:
 - **Local (Ollama / LM Studio)** — free and private, no key, and works in any browser. Point the extension at your own [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) server (or any OpenAI-compatible local server) and pick from the models you've installed. See [docs/local-llm-setup.md](./docs/local-llm-setup.md) for setup, including the CORS step.
 - **Groq** — free and fast. Create a free key at [console.groq.com/keys](https://console.groq.com/keys) and paste it in.
 - **OpenRouter** — 500+ models, free and paid. Create a key at [openrouter.ai/keys](https://openrouter.ai/keys); free models are flagged in the picker, paid models bill per-token to your account.
+- **OpenAI-compatible (custom)** — any server exposing `/chat/completions`. Bring your own base URL, model name, and optional API key. Useful for hosted providers not on OpenRouter, internal gateways, or local servers with auth.
 
-**Auto** uses on-device when your browser supports it, otherwise your Groq key, otherwise OpenRouter. **Local** is opt-in — select it explicitly to use your own server.
+**Auto** uses on-device when your browser supports it, otherwise your Groq key, otherwise OpenRouter. **Local** and **OpenAI-compatible** are opt-in — select them explicitly to use your own server.
 
 ## Usage
 
@@ -70,6 +74,8 @@ Open the extension's settings and pick an engine, or leave it on **Auto**:
 **Inline — Improve** — start typing in any composer and a pencil button appears in the corner. Click it to open the panel (pick a style, see the diff, Insert), or switch the button to **instant rewrite** in settings for a one-click polish with Undo.
 
 **Inline — Reply** — select the messages you're replying to anywhere on the page; the button turns into a speech bubble. Click it, then pick a tone, **Summarize**, or **You tell me** to type your intent in any language. Insert the drafted reply with one-tap Undo.
+
+**Right-click — Improve or rewrite** — select any text in any editable field (Google search box, Gmail, Notion, a comment box), right-click, and pick **Help me write or rewrite**. The panel opens with the selection as the draft, and on Insert only the selected range is replaced — surrounding text is preserved. Works on plain inputs and rich-text editors alike.
 
 **Model switch** — the active model shows in the panel/popup header; click it to search and swap. Handy when a free model is busy: switch and it retries on the new one. Pick **Auto · Fastest free** to let OpenRouter route to the fastest available free model and fail over automatically — the best default if you're sticking to free models.
 
@@ -94,22 +100,28 @@ npm run package       # zips both dists for store submission
 
 ```
 src/
-├── background/service-worker.js   # message handler, install/startup, stream relay
+├── background/service-worker.js   # message router, install/startup, stream relay, context menu
 ├── content/                        # injected into web pages
-│   ├── index.js                    # orchestrator: morph button + mode detection
+│   ├── index.js                    # orchestrator: morph button, mode detection, context-menu flow
 │   ├── button-injector.js          # the morphing Reply/Improve button + toasts
 │   ├── panel.js                    # reply/improve panel: chips, diff, model switch
 │   ├── content-button.css          # self-contained injected styles (theme-independent)
 │   ├── reply-mode.css              # reply-panel additions
 │   ├── snippet-expander.js
-│   └── text-target.js              # textarea/contentEditable helpers
+│   └── text-target.js              # field detection + React/Vue-safe writeText
 ├── popup/                          # toolbar popup
 │   ├── index.js
 │   ├── popup.html / popup.css / model-picker.css
-│   └── components/                 # ModelPicker.js, settings-ui.js
+│   └── components/                 # ModelPicker.js, settings-ui.js, ModelListModal.js
 ├── options/                        # full-tab settings page
 │   ├── index.js
 │   └── options.html / options.css
+├── engines/                        # AI engine registry (ondevice / groq / openrouter / local / openaicompat)
+│   ├── index.js
+│   ├── ondevice.js                 # Gemini Nano via the Prompt API
+│   ├── cloud.js                    # OpenAI-compatible cloud (OpenRouter + Groq)
+│   ├── local.js                    # Ollama / LM Studio / llama.cpp / vLLM
+│   └── openai-compatible.js        # any custom OpenAI Chat-Completions server
 ├── lib/                            # shared modules
 │   ├── browser.js                  # webextension-polyfill re-export
 │   ├── storage.js                  # storage.local wrapper + migration
@@ -117,8 +129,9 @@ src/
 │   ├── models-cache.js             # 1h TTL list + validation + formatting
 │   ├── system-prompts.js           # style prompts + reply-mode prompt builder
 │   ├── diff.js                     # word-level LCS diff
-│   ├── sanitize.js                 # strips chatty model wrappers
+│   ├── sanitize.js                 # strips reasoning blocks + chatty wrappers
 │   ├── errors.js                   # typed error classes with userMessage
+│   ├── transport.js                # extension ↔ userscript transport abstraction
 │   └── constants.js
 ├── shared/tokens.css               # design tokens + dark theme
 └── data/popular-models.js          # curated "Popular" tab list
@@ -126,8 +139,9 @@ src/
 
 `build.mjs` bundles each entry with esbuild and emits per-browser
 manifests (`manifest.chrome.json`, `manifest.firefox.json`) into
-`dist/<browser>/`. The inline button never sees your API key — generation
-streams through a service-worker port, so the key stays in the worker.
+`dist/<browser>/`. The inline button and context menu never see your
+API key — generation streams through a service-worker port, so the key
+stays in the worker.
 
 ### Coding standards
 
