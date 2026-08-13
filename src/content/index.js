@@ -114,6 +114,26 @@ function detectMode(field) {
   return "reply";
 }
 
+// Find the editable field that owns the current page selection (if any).
+// Returns the closest editable ancestor of the selection's anchor node, or null.
+// This is what the context-menu entry needs: the right-click could have fired
+// over any element and document.activeElement may not reflect it (e.g. when the
+// page took focus via programmatic blur, or the field never received focus
+// events that our content script captured). For context menus we care about
+// where the selection is, not where the focus is.
+function editableFromSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const node = sel.anchorNode;
+  if (!node) return null;
+  let el = node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== document.body) {
+    if (isTextInput(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
 function onButtonClick() {
   if (!activeField) return;
   const mode = detectMode(activeField);
@@ -147,29 +167,92 @@ function openPanelFor(field, mode) {
   });
 }
 
-// Triggered by the right-click context menu ("Help me write or rewrite"). We
-// bypass the inline button entirely so the user can invoke the panel from
-// chrome's own menu even when they never focused a field — same flow as a
-// click on the inline button once a field is resolved. `selectionText` is
-// informational; the existing detectMode() reads the live page selection, which
-// is what the panel actually uses for reply context.
+// Triggered by the right-click context menu ("Help me write or rewrite").
+// Resolves the field from the current page selection first (the user just
+// right-clicked on the text they want rewritten), then falls back to the
+// focused field, then to document.activeElement. If we find a field with a
+// non-collapsed selection inside it, the panel is opened in "selection"
+// mode and on insert replaces ONLY the selected range — so the user's
+// surrounding text is preserved. Without a selection inside an editable
+// field, fall back to the existing whole-field improve flow.
 function openFromContextMenu(selectionText) {
-  let field = activeField;
+  let field = editableFromSelection();
+  if (!field || !field.isConnected) field = activeField;
   if (!field || !field.isConnected || !isTextInput(field)) {
     const el = document.activeElement;
     if (isTextInput(el)) field = el;
   }
   if (!field || !field.isConnected) {
-    showToast("Click into a text field first, then try again.", { type: "info" });
+    console.warn("[content] openFromContextMenu: no editable field resolved. selection=", (selectionText || "").length, "chars");
+    showToast("Right-click inside a text field, or select the text you want rewritten.", { type: "info" });
     return;
   }
   activeField = field;
+  const sel = window.getSelection();
+  const insideSelection = sel && !sel.isCollapsed && sel.anchorNode
+    && (field === sel.anchorNode || field.contains(sel.anchorNode))
+    && (field === sel.focusNode || field.contains(sel.focusNode));
+  if (insideSelection) {
+    openPanelForSelection(field, selectionText || sel.toString());
+    return;
+  }
   const mode = detectMode(field);
   ensureButton(onButtonClick);
   setButtonMode(mode);
   setButtonVisible(true);
   positionButton(field);
   openPanelFor(field, mode);
+}
+
+// Same as openPanelFor but for an in-field selection: the panel drafts a
+// rewrite for the selected text only, and on Insert replaces the selection
+// (not the whole field).
+function openPanelForSelection(field, selectedText) {
+  const button = getButton();
+  if (!button) return;
+  ensureButton(onButtonClick);
+  setButtonMode("improve");
+  setButtonVisible(true);
+  positionButton(field);
+  openPanel({
+    anchorButton: button,
+    field,
+    mode: "improve",
+    draft: selectedText,
+    settings,
+    onInsert: result => {
+      replaceSelection(field, result);
+      field.focus();
+      showToast("Selection replaced.", {
+        type: "success",
+        duration: 6000,
+        action: { label: "Undo", fn: () => { writeText(field, selectedText); field.focus(); } },
+      });
+    },
+  });
+}
+
+// Replace the user's in-field selection with `value`, preserving the
+// surrounding text. Falls back to writing the full value if the live
+// selection can't be resolved (e.g. the field lost focus between panel
+// open and insert click).
+function replaceSelection(field, value) {
+  if (field.tagName === "TEXTAREA" || field.tagName === "INPUT") {
+    const sel = field.selectionStart;
+    const selEnd = field.selectionEnd;
+    if (sel == null || selEnd == null || sel === selEnd) {
+      writeText(field, value);
+      return;
+    }
+    const current = field.value;
+    const next = current.slice(0, sel) + value + current.slice(selEnd);
+    writeText(field, next);
+    const caret = sel + value.length;
+    field.setSelectionRange(caret, caret);
+    return;
+  }
+  // contentEditable: writeText already replaces the live selection via execCommand.
+  writeText(field, value);
 }
 
 async function improveInstant(field) {
