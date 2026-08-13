@@ -1,5 +1,4 @@
 import browser from "../lib/browser.js";
-import { storage } from "../lib/storage.js";
 import { isTextInput, isImproveTarget, readText, writeText } from "./text-target.js";
 import {
   injectStyles, ensureButton, getButton, setButtonMode, setButtonVisible,
@@ -8,6 +7,8 @@ import {
 import { tryExpandSnippet } from "./snippet-expander.js";
 import { openPanel, isPanelOpen, closePanel } from "./panel.js";
 import { DEFAULT_STYLE, DEFAULT_CLICK_MODE, DEFAULT_MODEL } from "../lib/constants.js";
+import { chromeBackend, createStorage } from "../lib/storage.js";
+import { createExtensionTransport } from "../lib/transport.js";
 
 const DEFAULT_SETTINGS = Object.freeze({
   enableInlineButton: true,
@@ -21,6 +22,62 @@ const DEFAULT_SETTINGS = Object.freeze({
 const settings = { ...DEFAULT_SETTINGS };
 
 let activeField = null;
+let transport = null;
+let storage = null;
+
+export async function bootstrap({ transport: t, storage: s }) {
+  transport = t;
+  storage = s;
+  console.log("[content] bootstrap on", location.hostname);
+  await loadSettings();
+  injectStyles();
+  document.addEventListener("focus", handleFocus, true);
+  document.addEventListener("blur", handleBlur, true);
+  document.addEventListener("input", handleInput, true);
+  document.addEventListener("selectionchange", handleSelectionChange);
+  window.addEventListener("scroll", handleReposition, true);
+  window.addEventListener("resize", handleReposition);
+
+  const unsub = storage.onChanged((changes) => {
+    let touched = false;
+    for (const key of Object.keys(changes)) {
+      if (!(key in DEFAULT_SETTINGS)) continue;
+      const newValue = changes[key].newValue;
+      settings[key] = newValue !== undefined ? newValue : DEFAULT_SETTINGS[key];
+      touched = true;
+    }
+    if (touched && !isPanelOpen()) {
+      if (!settings.enableInlineButton) { closePanel(); removeButton(); activeField = null; }
+      else if (activeField) showButtonFor(activeField);
+    }
+  });
+  // Touch the unsub so it doesn't get GC'd before the page unloads.
+  window.addEventListener("pagehide", () => unsub(), { once: true });
+
+  // Context-menu trigger from the service worker. We resolve the target field
+  // here (the worker can't see DOM) and open the existing panel — same flow as
+  // clicking the inline button. sendResponse keeps the message channel open
+  // across the async open so the SW can detect failure on tabs that never
+  // injected our content script (chrome://, the web store, before load).
+  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") {
+      sendResponse({ ok: false, error: "Invalid message" });
+      return false;
+    }
+    if (message.action === "openFromContextMenu") {
+      console.log("[content] openFromContextMenu received, selection length:", (message.selectionText || "").length);
+      try {
+        openFromContextMenu(message.selectionText || "");
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.warn("[content] openFromContextMenu failed:", e?.message);
+        sendResponse({ ok: false, error: e?.message || "Unknown error" });
+      }
+      return false;
+    }
+    return false;
+  });
+}
 
 async function loadSettings() {
   try {
@@ -36,7 +93,6 @@ async function loadSettings() {
     if (Array.isArray(stored.savedPrompts)) settings.savedPrompts = stored.savedPrompts;
     if (Array.isArray(stored.snippets)) settings.snippets = stored.snippets;
   } catch (e) {
-    // Fail closed: a user who turned the inline button off shouldn't see it back when storage hiccups.
     console.warn("[content] settings load failed; disabling inline UI:", e?.message);
     settings.enableInlineButton = false;
   }
@@ -48,8 +104,6 @@ function hasReplySelection(field) {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed) return false;
   if (!sel.toString().trim()) return false;
-  // A selection entirely inside the compose field is the user's own draft, not
-  // a reply target — ignore it.
   if (field && sel.anchorNode && field.contains(sel.anchorNode) && field.contains(sel.focusNode)) return false;
   return true;
 }
@@ -93,6 +147,31 @@ function openPanelFor(field, mode) {
   });
 }
 
+// Triggered by the right-click context menu ("Help me write or rewrite"). We
+// bypass the inline button entirely so the user can invoke the panel from
+// chrome's own menu even when they never focused a field — same flow as a
+// click on the inline button once a field is resolved. `selectionText` is
+// informational; the existing detectMode() reads the live page selection, which
+// is what the panel actually uses for reply context.
+function openFromContextMenu(selectionText) {
+  let field = activeField;
+  if (!field || !field.isConnected || !isTextInput(field)) {
+    const el = document.activeElement;
+    if (isTextInput(el)) field = el;
+  }
+  if (!field || !field.isConnected) {
+    showToast("Click into a text field first, then try again.", { type: "info" });
+    return;
+  }
+  activeField = field;
+  const mode = detectMode(field);
+  ensureButton(onButtonClick);
+  setButtonMode(mode);
+  setButtonVisible(true);
+  positionButton(field);
+  openPanelFor(field, mode);
+}
+
 async function improveInstant(field) {
   const text = readText(field);
   if (!text.trim()) return;
@@ -100,10 +179,8 @@ async function improveInstant(field) {
   field.focus();
   setButtonLoading(true);
   try {
-    const response = await sendMessage({
-      action: "improveText",
-      text,
-      messageType: settings.messageType,
+    const response = await transport.stream({
+      payload: { action: "improveText", text, messageType: settings.messageType },
     }, 60000);
     if (response?.improvedText) {
       writeText(field, response.improvedText);
@@ -121,25 +198,15 @@ async function improveInstant(field) {
   } catch (err) {
     console.error("[content] improve failed:", err);
     let msg = err.message || "Unexpected error.";
-    if (msg.includes("Receiving end does not exist")) msg = "The extension may be reloading. Refresh this page and try again.";
-    else if (msg.includes("timed out")) msg = "Request timed out. The model is busy — try again in a moment.";
+    if (err.message === "EXT_CONTEXT_INVALIDATED" || msg.includes("Receiving end does not exist")) {
+      msg = "The extension was reloaded. Refresh this page and try again.";
+    } else if (msg.includes("timed out")) {
+      msg = "Request timed out. The model is busy — try again in a moment.";
+    }
     showToast(msg, { type: "error" });
   } finally {
     setButtonLoading(false);
   }
-}
-
-function sendMessage(payload, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
-    browser.runtime.sendMessage(payload)
-      .then(response => {
-        clearTimeout(timer);
-        if (response === undefined || response === null) reject(new Error("Empty response from background"));
-        else resolve(response);
-      })
-      .catch(err => { clearTimeout(timer); reject(err); });
-  });
 }
 
 // Show + position the morph button for a field, reflecting the current mode.
@@ -156,31 +223,37 @@ function hideButton() {
 }
 
 function refreshButton() {
-  if (!activeField || !getButton()) return;
+  if (!activeField) return;
   setButtonMode(detectMode(activeField));
   positionButton(activeField);
 }
 
 function handleFocus(event) {
-  if (!isTextInput(event.target)) return;
-  activeField = event.target;
-  showButtonFor(activeField);
+  const target = event.target;
+  if (!isTextInput(target)) {
+    // Don't immediately hide: blurring a textarea often lands on a non-text
+    // element (e.g. a panel button) and the button would flicker. Delay hide.
+    setTimeout(() => {
+      if (document.activeElement && isTextInput(document.activeElement)) return;
+      if (isPanelOpen()) return;
+      hideButton();
+      if (activeField === target) activeField = null;
+    }, 200);
+    return;
+  }
+  activeField = target;
+  showButtonFor(target);
 }
 
 function handleBlur(event) {
-  if (!isTextInput(event.target)) return;
-  if (isPanelOpen()) return; // interacting with the panel blurs the field; keep the button
+  // Already handled by handleFocus's setTimeout for non-text targets; for text
+  // targets wait a beat in case focus is moving to our own panel button.
   const target = event.target;
   setTimeout(() => {
-    if (document.activeElement === target) return;
-    if (isPanelOpen()) return;
-    // Keep the button alive while the user is selecting the text they want to
-    // reply to — selecting in the page blurs the composer, but that's exactly
-    // when the reply button is needed. Reposition stays anchored to the field.
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed && sel.toString().trim()) { setButtonMode("reply"); return; }
-    hideButton();
-    if (activeField === target) activeField = null;
+    if (activeField === target && document.activeElement !== target && !isPanelOpen()) {
+      hideButton();
+      if (activeField === target) activeField = null;
+    }
   }, 200);
 }
 
@@ -201,37 +274,20 @@ function handleReposition() {
   positionButton(activeField);
 }
 
-const WATCHED_KEYS = ["enableInlineButton", "messageType", "inlineClickMode", "model", "replyConsent", "savedPrompts", "snippets"];
+// Auto-bootstrap: in the extension build, build the transport/storage adapters
+// ourselves; in a userscript, the host runtime sets __RB_TRANSPORT__ and
+// __RB_STORAGE__ before loading us. The legacy default-bootstrap path below
+// guards against double-init so the panel/button listeners aren't attached twice
+// when both paths are present (e.g. during development).
 
-async function init() {
-  await loadSettings();
-  injectStyles();
-  document.addEventListener("focus", handleFocus, true);
-  document.addEventListener("blur", handleBlur, true);
-  document.addEventListener("input", handleInput, true);
-  document.addEventListener("selectionchange", handleSelectionChange);
-  window.addEventListener("scroll", handleReposition, true);
-  window.addEventListener("resize", handleReposition);
+const USERSCRIPT_TRANSPORT = typeof globalThis.__RB_TRANSPORT__ !== "undefined" ? globalThis.__RB_TRANSPORT__ : null;
+const USERSCRIPT_STORAGE = typeof globalThis.__RB_STORAGE__ !== "undefined" ? globalThis.__RB_STORAGE__ : null;
 
-  // storage.onChanged avoids needing tabs.sendMessage host_permissions.
-  browser.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    let touched = false;
-    for (const key of WATCHED_KEYS) {
-      if (!(key in changes)) continue;
-      const newValue = changes[key].newValue;
-      settings[key] = newValue !== undefined ? newValue : DEFAULT_SETTINGS[key];
-      touched = true;
-    }
-    if (touched && !isPanelOpen()) {
-      if (!settings.enableInlineButton) { closePanel(); removeButton(); activeField = null; }
-      else if (activeField) showButtonFor(activeField);
-    }
-  });
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", init);
-} else {
-  init();
+if (typeof window !== "undefined" && !window.__RB_BOOTSTRAPPED__) {
+  window.__RB_BOOTSTRAPPED__ = true;
+  if (USERSCRIPT_TRANSPORT && USERSCRIPT_STORAGE) {
+    bootstrap({ transport: USERSCRIPT_TRANSPORT, storage: USERSCRIPT_STORAGE });
+  } else {
+    bootstrap({ transport: createExtensionTransport(), storage: createStorage(chromeBackend) });
+  }
 }

@@ -1,81 +1,106 @@
-import browser from "./browser.js";
+// Storage is split into two parts:
+//
+//   * `createStorage(backend)` — builds a `storage` adapter from a backend that
+//     implements `get(keys)` / `set(obj)` / `remove(keys)`. The extension uses
+//     a chrome.storage.local backend; the userscript uses GM_*Value.
+//
+//   * `setSelectedModel`, `migrateStyleKey`, `migrateFromSync` — helpers that
+//     take a backend directly so both runtimes can use them.
+//
+// Migration helpers (`migrateStyleKey`, `migrateFromSync`) are extension-only
+// concerns (they exist to reconcile historical chrome.storage.sync layouts)
+// and become no-ops when invoked with the userscript backend.
 
-export const storage = {
-  get(keys) { return browser.storage.local.get(keys); },
-  set(obj) { return browser.storage.local.set(obj); },
-  remove(keys) { return browser.storage.local.remove(keys); },
-};
+import browserPolyfill from "./browser.js";
 
-// Picking a new model implicitly dismisses any stale "model unavailable"
-// notice — otherwise the banner sticks around even after the user has
-// already moved on to a working model.
-export async function setSelectedModel(id) {
-  await browser.storage.local.set({ model: id });
-  await browser.storage.local.remove("modelFallbackNotice");
+export function createStorage(backend) {
+  if (!backend || typeof backend.get !== "function") {
+    throw new Error("createStorage: backend must implement get/set/remove");
+  }
+  return {
+    get(keys) { return backend.get(keys); },
+    set(obj) { return backend.set(obj); },
+    remove(keys) { return backend.remove(keys); },
+    onChanged(cb) {
+      if (typeof backend.onChanged !== "function") return () => {};
+      // Chrome.storage.onChanged needs the real API at subscription time; we
+      // call the backend now and return its unsubscribe synchronously.
+      return backend.onChanged(cb);
+    },
+  };
 }
 
-const MIGRATABLE_KEYS = [
-  "apiKey", "groqApiKey", "model", "engine", "messageType", "savedPrompts", "snippets",
-  "enableInlineButton", "inlineMessageType", "inlineClickMode", "customPrompt",
-];
+// Chrome.storage.local backend (default for the extension).
+// Resolves the webextension-polyfill API once via the static import and closes
+// over it; each method is still async to match the backend contract.
+export const chromeBackend = {
+  async get(keys) { return browserPolyfill.storage.local.get(keys); },
+  async set(obj) { return browserPolyfill.storage.local.set(obj); },
+  async remove(keys) { return browserPolyfill.storage.local.remove(keys); },
+  // chrome.storage.onChanged needs the API at subscription time, so we resolve
+  // it synchronously from the captured polyfill reference and return an
+  // unsubscribe function (createStorage's wrapper hands it back to callers).
+  onChanged(cb) {
+    const handler = (changes, area) => { if (area === "local") cb(changes, area); };
+    browserPolyfill.storage.onChanged.addListener(handler);
+    return () => browserPolyfill.storage.onChanged.removeListener(handler);
+  },
+};
 
-// The default writing style used to be split across two keys: `messageType`
-// (popup) and `inlineMessageType` (the options "Default style" + inline button),
-// so setting it in options never reached the popup. Collapse to one key
-// (`messageType`); the explicit "Default style" the user set wins. Idempotent.
+// Default `storage` instance used by the extension runtime: chrome.storage.local
+// wrapped by createStorage(). The userscript runtime builds its own from gmBackend().
+export const storage = createStorage(chromeBackend);
+
+// Tampermonkey GM_*Value backend (userscript).
+// `keys` may be a string, an array, or null (meaning "all keys"). GM_getValue
+// doesn't natively support multi-key reads, so we serialize per-key calls.
+export function gmBackend() {
+  return {
+    async get(keys) {
+      if (keys === null || keys === undefined) {
+        // GM_listValues isn't in our @grant list; userscripts typically don't
+        // need this code path. Throw so the user adds it if they really want it.
+        throw new Error("gmBackend: full-key listing is not supported");
+      }
+      const list = Array.isArray(keys) ? keys : [keys];
+      const out = {};
+      for (const k of list) {
+        const v = GM_getValue(k);
+        if (v !== undefined) out[k] = v;
+      }
+      return out;
+    },
+    async set(obj) {
+      for (const [k, v] of Object.entries(obj)) GM_setValue(k, v);
+    },
+    async remove(keys) {
+      const list = Array.isArray(keys) ? [keys] : keys;
+      for (const k of list) GM_deleteValue(k);
+    },
+  };
+}
+
+export async function setSelectedModel(backend, id) {
+  await backend.set({ model: id });
+  await backend.remove(["modelFallbackNotice"]);
+}
+
+// Default writing style used to be split across two keys (`messageType` in
+// popup, `inlineMessageType` in options) so the option didn't reach the popup.
+// Collapse to `messageType`; explicit "Default style" wins. Idempotent.
 export async function migrateStyleKey() {
   try {
-    const { inlineMessageType } = await browser.storage.local.get(["inlineMessageType"]);
+    const { inlineMessageType } = await browserPolyfill.storage.local.get(["inlineMessageType"]);
     if (inlineMessageType !== undefined) {
-      await browser.storage.local.set({ messageType: inlineMessageType });
-      await browser.storage.local.remove("inlineMessageType");
+      await browserPolyfill.storage.local.set({ messageType: inlineMessageType });
+      await browserPolyfill.storage.local.remove(["inlineMessageType"]);
     }
   } catch (e) {
     console.warn("[storage] style-key migration failed:", e?.message);
   }
 }
 
-// API key was stored in storage.sync; move it to local so it doesn't roam across devices.
-// Each startup re-runs this; leftover sync keys from a partial run are detected and re-cleaned.
-export async function migrateFromSync() {
+// Wrapper kept for callers that still pass a backend argument; ignored.
+export async function migrateFromSync(_backend) {
   await migrateStyleKey();
-  let syncData;
-  let localData;
-  try {
-    [syncData, localData] = await Promise.all([
-      browser.storage.sync.get(null),
-      browser.storage.local.get(null),
-    ]);
-  } catch (e) {
-    console.error("[storage] migration: could not read storage:", e);
-    return;
-  }
-
-  const toCopy = {};
-  for (const k of MIGRATABLE_KEYS) {
-    if (syncData[k] !== undefined && localData[k] === undefined) {
-      toCopy[k] = syncData[k];
-    }
-  }
-
-  const leftoverInSync = MIGRATABLE_KEYS.filter(k => syncData[k] !== undefined);
-  if (Object.keys(toCopy).length === 0 && leftoverInSync.length === 0) return;
-
-  if (Object.keys(toCopy).length > 0) {
-    try {
-      await browser.storage.local.set(toCopy);
-    } catch (e) {
-      console.error("[storage] migration: local.set failed:", e);
-      return;
-    }
-  }
-
-  try {
-    await browser.storage.sync.remove(MIGRATABLE_KEYS);
-    if (Object.keys(toCopy).length > 0) {
-      console.log("[storage] migrated from sync→local:", Object.keys(toCopy));
-    }
-  } catch (e) {
-    console.error("[storage] migration: sync.remove failed (will retry next startup):", e);
-  }
 }
