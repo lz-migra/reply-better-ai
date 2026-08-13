@@ -61,25 +61,19 @@ describe("isImproveTarget", () => {
     }
   });
 
-  it("accepts contenteditable when aria-multiline is true", () => {
+  it("accepts contenteditable unconditionally (matches native spellcheck)", () => {
     expect(isImproveTarget(makeElement({
-      tagName: "DIV", isContentEditable: true, ariaMultiline: "true", height: 18,
+      tagName: "DIV", isContentEditable: true, height: 18,
+    }))).toBe(true);
+    expect(isImproveTarget(makeElement({
+      tagName: "DIV", contentEditable: "true", height: 22,
+    }))).toBe(true);
+    expect(isImproveTarget(makeElement({
+      tagName: "DIV", isContentEditable: true, ariaMultiline: "true", height: 80,
     }))).toBe(true);
   });
 
-  it("accepts contenteditable when rendered tall enough", () => {
-    expect(isImproveTarget(makeElement({
-      tagName: "DIV", isContentEditable: true, height: 80,
-    }))).toBe(true);
-  });
-
-  it("rejects single-line contenteditable (height below threshold and no aria-multiline)", () => {
-    expect(isImproveTarget(makeElement({
-      tagName: "DIV", isContentEditable: true, height: 22,
-    }))).toBe(false);
-  });
-
-  it("rejects non-editable divs even if tall", () => {
+  it("rejects non-editable divs", () => {
     expect(isImproveTarget(makeElement({ tagName: "DIV", height: 200 }))).toBe(false);
   });
 

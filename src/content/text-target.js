@@ -1,5 +1,3 @@
-import { MIN_IMPROVE_TARGET_HEIGHT } from "../lib/constants.js";
-
 // Input types we explicitly refuse to treat as "improve" targets. Search boxes
 // (`type="search"`) and one-line metadata fields (password, email, url, tel,
 // number, date pickers…) are intentionally excluded — they shouldn't be
@@ -21,12 +19,11 @@ export function isTextInput(element) {
   return element.isContentEditable === true || element.contentEditable === "true";
 }
 
-// The button only makes sense on long-form composers, not single-line search
-// boxes or username fields. Textareas are always multi-line by intent.
-// <input type="text"> is accepted (per user preference) so the rewrite button
-// shows up on any plain text input. Contenteditable hosts (Gmail, Twitter/X,
-// LinkedIn, Slack) are accepted only when they declare aria-multiline or
-// render at least two lines tall.
+// Same shape as a native browser spellcheck: any text-accepting surface shows
+// the button. contentEditable hosts are accepted unconditionally because an
+// empty rich-text editor (Gmail, Twitter/X, Notion, LinkedIn, Slack) renders
+// under the previous 40px threshold, and rejecting them made the button feel
+// flaky. The EXCLUDED_INPUT_TYPES list above is the only gate.
 export function isImproveTarget(element) {
   if (!element) return false;
   if (element.tagName === "TEXTAREA") return true;
@@ -34,10 +31,7 @@ export function isImproveTarget(element) {
     const t = (element.type || "text").toLowerCase();
     return !EXCLUDED_INPUT_TYPES.has(t);
   }
-  if (element.isContentEditable !== true && element.contentEditable !== "true") return false;
-  if (element.getAttribute && element.getAttribute("aria-multiline") === "true") return true;
-  const rect = typeof element.getBoundingClientRect === "function" ? element.getBoundingClientRect() : null;
-  return !!rect && rect.height >= MIN_IMPROVE_TARGET_HEIGHT;
+  return element.isContentEditable === true || element.contentEditable === "true";
 }
 
 export function readText(element) {
