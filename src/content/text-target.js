@@ -78,11 +78,19 @@ export function writeText(element, value) {
     try { ok = document.execCommand("insertText", false, value); }
     catch { /* falls through to the InputEvent path */ }
     if (!ok) {
-      // Modern replacement for the deprecated path: dispatch a synthesized
-      // InputEvent with inputType "insertText", which Chromium routes through
-      // the same editable-region pipeline as a real keystroke. In environments
-      // without InputEvent (tests, very old browsers) fall back to a plain Event
-      // with the same inputType attached as a property.
+      // Synthesized events notify listeners but don't mutate the DOM by
+      // themselves. execCommand failed, so we have to do the mutation by hand
+      // and then notify the framework. Prefer the live selection's range so
+      // we preserve the cursor position the user just had; fall back to
+      // innerText only if there is no selection at all.
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(document.createTextNode(value));
+      } else {
+        element.innerText = value;
+      }
       let ev;
       try {
         ev = new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: value });

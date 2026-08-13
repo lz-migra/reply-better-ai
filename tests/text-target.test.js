@@ -123,10 +123,16 @@ function installDomStubs({ execCommandReturn = true, execCommandThrows = false }
     if (execCommandThrows) throw new Error("disabled");
     return execCommandReturn;
   });
+  const range = {
+    selectNodeContents: vi.fn(),
+    deleteContents: vi.fn(),
+    insertNode: vi.fn(),
+  };
   const selection = {
     removeAllRanges: vi.fn(), addRange: vi.fn(),
+    rangeCount: 1,
+    getRangeAt: vi.fn(() => range),
   };
-  const range = { selectNodeContents: vi.fn() };
   const getSelection = vi.fn(() => selection);
   globalThis.window = {
     HTMLInputElement: htmlInputElement,
@@ -135,6 +141,7 @@ function installDomStubs({ execCommandReturn = true, execCommandThrows = false }
   };
   globalThis.document = {
     createRange: () => range,
+    createTextNode: (text) => ({ nodeType: 3, nodeValue: text }),
     execCommand,
     getSelection,
   };
@@ -225,18 +232,40 @@ describe("writeText — contentEditable", () => {
     expect(globalThis.window == null).toBe(false); // selection helpers invoked via document.getSelection
   });
 
-  it("falls back to InputEvent when execCommand returns false", () => {
+  it("falls back to DOM mutation + InputEvent when execCommand returns false", () => {
     const { el, events } = makeEditable({ execCommandOk: false });
     writeText(el, "modern path");
     const insert = events.find(e => e.type === "input" && e.inputType === "insertText");
     expect(insert).toBeTruthy();
     expect(insert.data).toBe("modern path");
+    // The DOM must have actually been mutated — synthetic events don't change it.
+    expect(globalThis.document.createRange().deleteContents).toHaveBeenCalled();
+    expect(globalThis.document.createRange().insertNode).toHaveBeenCalled();
+    const inserted = globalThis.document.createRange().insertNode.mock.calls[0][0];
+    expect(inserted.nodeValue).toBe("modern path");
   });
 
-  it("falls back to InputEvent when execCommand throws (deprecated/disabled)", () => {
+  it("falls back to DOM mutation + InputEvent when execCommand throws (deprecated/disabled)", () => {
     const { el, events } = makeEditable({ execCommandThrows: true });
     writeText(el, "still ok");
     const insert = events.find(e => e.type === "input" && e.inputType === "insertText");
     expect(insert).toBeTruthy();
+    expect(globalThis.document.createRange().deleteContents).toHaveBeenCalled();
+  });
+
+  it("uses innerText when no selection is available", () => {
+    installDomStubs({ execCommandReturn: false });
+    globalThis.window.getSelection = () => null;
+    const events = [];
+    const el = {
+      tagName: "DIV",
+      isContentEditable: true,
+      focus: vi.fn(),
+      innerText: "old",
+      dispatchEvent(ev) { events.push(ev.type); return true; },
+    };
+    writeText(el, "new");
+    expect(el.innerText).toBe("new");
+    expect(events).toContain("input");
   });
 });
