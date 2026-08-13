@@ -26,8 +26,10 @@ let transport = null;
 let storage = null;
 // Chrome clears the page selection before showing the native context menu, so
 // by the time our onMessage handler fires, window.getSelection() is empty.
-// We capture the selection on `contextmenu` (last chance to see it) and use
-// it when the menu item is clicked.
+// We capture the right-click target + (optional) selection on `contextmenu`
+// and use it when the menu item is clicked. event.target is the most reliable
+// signal — sites like Google re-focus in their own contextmenu handler and
+// collapse the selection, but the target element is always populated.
 let lastContextMenu = null; // { field, selectedText, at }
 
 export async function bootstrap({ transport: t, storage: s }) {
@@ -310,26 +312,26 @@ function replaceSelection(field, value) {
   writeText(field, value);
 }
 
-// Capture the page selection + its owning editable field at the moment the user
-// right-clicks. Chrome collapses the selection before showing the native menu,
-// so by the time our onMessage fires, window.getSelection() is empty and the
-// only signal we have is info.selectionText from the SW — but that loses the
-// owning field. Snapshotting here preserves both.
+// Capture the editable field under the right-click target + (if any) the
+// selection text, at the moment of the contextmenu event. Chrome and many
+// pages (Google, Facebook) re-focus and collapse the selection in their own
+// contextmenu handlers, so by the time our onMessage fires, window.getSelection()
+// is empty — but event.target is always populated. The snapshot stores both
+// signals: the field (always) and the selection (only if non-empty).
 function handleContextMenu(event) {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
-  const text = sel.toString();
-  if (!text.trim()) return;
-  const node = sel.anchorNode;
-  if (!node) return;
-  let el = node.nodeType === 3 ? node.parentElement : node;
+  let el = event.target;
+  if (el && el.nodeType === 3) el = el.parentElement;
+  let field = null;
   while (el && el !== document.body) {
-    if (isEditableForMenu(el)) {
-      lastContextMenu = { field: el, selectedText: text, at: Date.now() };
-      return;
-    }
+    if (isEditableForMenu(el)) { field = el; break; }
     el = el.parentElement;
   }
+  if (!field) return;
+  const sel = window.getSelection();
+  const selectedText = (sel && !sel.isCollapsed && sel.toString().trim())
+    ? sel.toString()
+    : "";
+  lastContextMenu = { field, selectedText, at: Date.now() };
 }
 
 async function improveInstant(field) {
