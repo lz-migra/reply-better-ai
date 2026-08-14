@@ -85,6 +85,13 @@ export async function setSelectedModel(backend, id) {
   await backend.remove(["modelFallbackNotice"]);
 }
 
+// Per-engine model setters. Groq uses its own storage key (`groqModel`) so a
+// user's OpenRouter model choice and Groq model choice don't fight each other
+// when the active engine flips between them.
+export async function setGroqModel(backend, id) {
+  await backend.set({ groqModel: id });
+}
+
 // Default writing style used to be split across two keys (`messageType` in
 // popup, `inlineMessageType` in options) so the option didn't reach the popup.
 // Collapse to `messageType`; explicit "Default style" wins. Idempotent.

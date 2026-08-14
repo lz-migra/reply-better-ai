@@ -75,27 +75,29 @@ describe("engineKeyVisibility", () => {
 });
 
 describe("engineUsesModelPicker", () => {
-  it("shows the model picker for openrouter and auto", () => {
+  it("shows the model picker for openrouter, groq, and auto", () => {
     expect(engineUsesModelPicker("openrouter")).toBe(true);
+    expect(engineUsesModelPicker("groq")).toBe(true);
     expect(engineUsesModelPicker("auto")).toBe(true);
     expect(engineUsesModelPicker(undefined)).toBe(true);
   });
-  it("hides it for engines with their own model", () => {
+  it("hides it for engines with their own configured model", () => {
     expect(engineUsesModelPicker("ondevice")).toBe(false);
-    expect(engineUsesModelPicker("groq")).toBe(false);
     expect(engineUsesModelPicker("local")).toBe(false);
+    expect(engineUsesModelPicker("openaicompat")).toBe(false);
   });
 });
 
 describe("engineModelSummary", () => {
   it("describes the fixed-model engines", () => {
     expect(engineModelSummary("ondevice")).toMatch(/Gemini Nano/);
-    expect(engineModelSummary("groq")).toMatch(/Groq/);
   });
-  it("returns null for picker engines and for local (resolved by the caller)", () => {
+  it("returns null for picker engines and for local/openaicompat (resolved by the caller)", () => {
     expect(engineModelSummary("openrouter")).toBe(null);
+    expect(engineModelSummary("groq")).toBe(null);
     expect(engineModelSummary("auto")).toBe(null);
     expect(engineModelSummary("local")).toBe(null);
+    expect(engineModelSummary("openaicompat")).toBe(null);
   });
 });
 

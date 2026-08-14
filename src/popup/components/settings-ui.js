@@ -43,14 +43,21 @@ export function renderModelChip({ avatarEl, nameEl, metaEl, models, currentModel
   const model = models.find(m => m.id === currentModelId);
   if (model) {
     if (avatarEl) {
-      avatarEl.textContent = getProviderMonogram(model);
-      avatarEl.style.background = getProviderColor(model);
+      // Groq rows have owned_by instead of provider; render their avatar from
+      // the model id's first letter. OpenRouter rows fall through to the
+      // existing provider-aware helpers.
+      const avatar = model.owned_by
+        ? (model.id[0] || "?").toUpperCase()
+        : getProviderMonogram(model);
+      avatarEl.textContent = avatar;
+      avatarEl.style.background = model.owned_by ? "#f55036" : getProviderColor(model);
     }
     nameEl.textContent = model.name || model.id;
-    const price = isFree(model)
-      ? "Free"
-      : (() => { const p = pricePerMTok(model); return p ? `${formatUsd(p.in)} / ${formatUsd(p.out)} per MTok` : "—"; })();
-    metaEl.textContent = `${model.id} · ${formatContextLength(model)} · ${price}`;
+    const ctx = formatContextLength(model);
+    const price = model.pricing
+      ? (isFree(model) ? "Free" : (() => { const p = pricePerMTok(model); return p ? `${formatUsd(p.in)} / ${formatUsd(p.out)} per MTok` : "—"; })())
+      : null;
+    metaEl.textContent = [model.id, ctx, price].filter(Boolean).join(" · ");
   } else {
     if (avatarEl) { avatarEl.textContent = "··"; avatarEl.style.background = "var(--rb-gray-500)"; }
     nameEl.textContent = currentModelId || DEFAULT_MODEL;

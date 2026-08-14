@@ -17,6 +17,11 @@ export const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // ~1000 req/day per user (BYOK). Default to a capable, fast free model.
 export const GROQ_BASE = "https://api.groq.com/openai/v1";
 export const GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile";
+// Storage keys + TTL for the Groq model list (mirrors OpenRouter's cache pattern).
+// Cached in storage.local so popup/options reads don't hit the network on every
+// open. Fetched lazily from GET /openai/v1/models; see src/lib/groq-models.js.
+export const GROQ_MODELS_CACHE_KEY = "groqModelsCache";
+export const GROQ_MODELS_TTL_MS = 60 * 60 * 1000;
 // Local engine: any OpenAI-compatible server on the user's machine (Ollama,
 // LM Studio, llama.cpp, vLLM…). No API key. The base URL is itself a setting;
 // presets fill the two common defaults. See src/engines/local.js.

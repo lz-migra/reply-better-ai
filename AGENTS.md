@@ -17,7 +17,7 @@ Compact index for agent sessions. For full rationale read the linked docs.
 | id | kind | Storage keys | Source |
 |----|------|--------------|--------|
 | `ondevice` | `on-device` | — | Chrome's `LanguageModel` Prompt API (Gemini Nano) |
-| `groq` | `cloud` | `groqApiKey`, `groqQuota` | `engines/cloud.js` (OpenAI-compatible, user key) |
+| `groq` | `cloud` | `groqApiKey`, `groqModel`, `groqQuota` | `engines/cloud.js` (OpenAI-compatible, user key) |
 | `openrouter` | `cloud` | `apiKey`, `model`, `modelsCache`, `modelFallbackNotice` | `engines/cloud.js` (OpenAI-compatible, user key) |
 | `local` | `local` | `localBaseUrl`, `localModel`, `localPreset` | `engines/local.js` (Ollama / LM Studio / llama.cpp / vLLM) |
 | `openaicompat` | `cloud` | `openaiCompatBaseUrl`, `openaiCompatApiKey`, `openaiCompatModel` | `engines/openai-compatible.js` (any OpenAI Chat-Completions server) |
@@ -31,6 +31,8 @@ Three rules that come back to bite:
 3. **`orderedEngines()` retries the next engine only before any output has streamed.** Once a chunk has been sent to the client, the worker stops trying alternatives. Never double-stream a partial result.
 
 `Auto · Fastest free` is a sentinel model id (`auto:fastest-free`) the user can pick in the model picker. The openrouter engine resolves it to a `models: [...]` array at request time (reasoning models excluded, popular ones first, capped at `AUTO_FREE_MODEL_LIMIT`). OpenRouter picks the fastest and fails over automatically on error.
+
+The Groq engine has its own picker (`GroqModelPicker`) backed by `src/lib/groq-models.js` — lazy `GET /openai/v1/models` with a 1h storage cache under `groqModelsCache`. Groq models are simpler than OpenRouter's (no pricing, no providers), so the picker is a flat searchable list with owned_by + context_window metadata. The user-selected id lives under `groqModel` (separate from `model`) so flipping between OpenRouter and Groq doesn't clobber the other engine's choice.
 
 `validateSelectedModel` returns `{ valid: true, deferred: true }` when there's no live list and no cache — defer the verdict rather than asserting "all good" so a flapping network doesn't silently accept a missing model. The startup validation runs from `onInstalled` and `onStartup` and rewrites `model` to the fallback plus sets `modelFallbackNotice` if the saved model is gone; any successful revalidation must clear that notice.
 

@@ -1,12 +1,13 @@
 import browser from "../lib/browser.js";
-import { storage, migrateFromSync, setSelectedModel } from "../lib/storage.js";
+import { storage, migrateFromSync, setSelectedModel, setGroqModel } from "../lib/storage.js";
 import { validateApiKey, getKeyInfo } from "../lib/openrouter.js";
 import { resolveSystemPrompt } from "../lib/system-prompts.js";
-import { DEFAULT_MODEL, DEFAULT_STYLE, MAX_INPUT_LENGTH, AUTO_FREE_MODEL } from "../lib/constants.js";
+import { DEFAULT_MODEL, DEFAULT_STYLE, MAX_INPUT_LENGTH, AUTO_FREE_MODEL, GROQ_DEFAULT_MODEL } from "../lib/constants.js";
 import { getModels } from "../lib/models-cache.js";
 import { resolveActiveEngine, describeActiveEngine, engineKeyVisibility, engineUsesModelPicker, engineModelSummary, hasAnyUsableEngine } from "../engines/index.js";
 import { diffWords } from "../lib/diff.js";
 import { ModelPicker } from "./components/ModelPicker.js";
+import { GroqModelPicker } from "./components/GroqModelPicker.js";
 import { fillStyleSelect, renderModelChip, managerItem } from "./components/settings-ui.js";
 
 const $ = id => document.getElementById(id);
@@ -115,7 +116,26 @@ function refreshChip() {
 }
 
 async function ensureModels() {
-  if (state.modelsCache.length) return;
+  // Pick the right cache source for the active engine. Groq models have a
+  // different shape (owned_by, context_window) than OpenRouter (provider,
+  // pricing), but renderModelChip handles both — see how it branches on
+  // model.owned_by.
+  const engineId = els.engineSelect.value;
+  const hasGroqCache = state.modelsCache.some(m => m.owned_by);
+  const hasOpenRouterCache = state.modelsCache.some(m => m.pricing || m.context_length === undefined);
+  if (engineId === "groq") {
+    if (hasGroqCache) return;
+    try {
+      const { getGroqModels } = await import("../lib/groq-models.js");
+      const result = await getGroqModels();
+      state.modelsCache = result.models;
+      refreshChip();
+    } catch (e) {
+      console.warn("[popup] groq models load failed:", e?.message);
+    }
+    return;
+  }
+  if (hasOpenRouterCache) return;
   try {
     const result = await getModels();
     state.modelsCache = result.models;
@@ -264,20 +284,36 @@ function renderSnippets() {
 /* ── Picker ──────────────────────────────────────────────────────────── */
 function openPicker() {
   showPicker();
-  state.picker = new ModelPicker({
-    container: els.pickerContainer,
-    currentModelId: state.currentModelId,
-    onSelect: async model => {
-      state.currentModelId = model.id;
-      if (state.modelsCache.length === 0 && state.picker?.models?.length) state.modelsCache = state.picker.models;
-      await setSelectedModel(model.id);
-      els.fallbackBanner.classList.remove("show");
-      refreshChip();
-      showSettings();
-      showStatus(`Model set to ${model.name || model.id}`);
-    },
-    onClose: () => showSettings(),
-  });
+  const engineId = els.engineSelect.value;
+  const onSelectOpenRouter = async model => {
+    state.currentModelId = model.id;
+    if (state.modelsCache.length === 0 && state.picker?.models?.length) state.modelsCache = state.picker.models;
+    await setSelectedModel(model.id);
+    els.fallbackBanner.classList.remove("show");
+    refreshChip();
+    showSettings();
+    showStatus(`Model set to ${model.name || model.id}`);
+  };
+  const onSelectGroq = async model => {
+    state.currentModelId = model.id;
+    await setGroqModel(model.id);
+    refreshChip();
+    showSettings();
+    showStatus(`Model set to ${model.id}`);
+  };
+  state.picker = engineId === "groq"
+    ? new GroqModelPicker({
+        container: els.pickerContainer,
+        currentModelId: state.currentModelId,
+        onSelect: onSelectGroq,
+        onClose: () => showSettings(),
+      })
+    : new ModelPicker({
+        container: els.pickerContainer,
+        currentModelId: state.currentModelId,
+        onSelect: onSelectOpenRouter,
+        onClose: () => showSettings(),
+      });
   state.picker.open();
 }
 
@@ -391,12 +427,17 @@ async function engineQuotaText(d) {
 async function init() {
   await migrateFromSync();
   const data = await storage.get([
-    "apiKey", "groqApiKey", "engine", "model", "messageType", "savedPrompts", "snippets",
+    "apiKey", "groqApiKey", "engine", "model", "groqModel", "messageType", "savedPrompts", "snippets",
     "enableInlineButton", "inlineClickMode",
   ]);
   state.savedPrompts = Array.isArray(data.savedPrompts) ? data.savedPrompts : [];
   state.snippets = Array.isArray(data.snippets) ? data.snippets : [];
-  state.currentModelId = data.model || DEFAULT_MODEL;
+  // The active engine's selected model id — different storage keys per engine
+  // so flipping between OpenRouter and Groq doesn't clobber each other's choice.
+  const activeEngine = data.engine || "auto";
+  state.currentModelId = activeEngine === "groq"
+    ? (data.groqModel || GROQ_DEFAULT_MODEL)
+    : (data.model || DEFAULT_MODEL);
 
   // One default-style setting (messageType) drives the popup's Style dropdown,
   // the settings "Default style", and the inline button. Both selects reflect it.
@@ -406,7 +447,7 @@ async function init() {
   const clickMode = data.inlineClickMode || "panel";
   const clickRadio = document.querySelector(`#inline-click-mode input[value="${clickMode}"]`);
   if (clickRadio) clickRadio.checked = true;
-  els.engineSelect.value = data.engine || "auto";
+  els.engineSelect.value = activeEngine;
   reflectEngineFields(els.engineSelect.value);
   if (data.groqApiKey) els.groqApiKey.value = data.groqApiKey;
   renderPrompts();
@@ -447,15 +488,27 @@ async function init() {
   // settings
   els.engineSelect.addEventListener("change", async () => {
     await storage.set({ engine: els.engineSelect.value }).catch(() => {});
+    // Swap the displayed model id to the active engine's stored selection so
+    // the chip doesn't show a stale model from the previous engine.
+    const data = await storage.get(["model", "groqModel"]);
+    state.currentModelId = els.engineSelect.value === "groq"
+      ? (data.groqModel || GROQ_DEFAULT_MODEL)
+      : (data.model || DEFAULT_MODEL);
+    state.modelsCache = []; // force ensureModels to refetch for the new engine
     reflectEngineFields(els.engineSelect.value);
     updateActiveEngineLabel();
+    ensureModels();
     refreshChip();
   });
   els.openOptionsLocal.addEventListener("click", e => { e.preventDefault(); browser.runtime.openOptionsPage().catch(() => {}); });
   if (els.openOptionsOpenAICompat) els.openOptionsOpenAICompat.addEventListener("click", e => { e.preventDefault(); browser.runtime.openOptionsPage().catch(() => {}); });
   els.groqApiKey.addEventListener("change", async () => {
     await storage.set({ groqApiKey: els.groqApiKey.value.trim() }).catch(() => {});
+    // Clearing the cache forces ensureModels to hit the network now that the
+    // key is set — otherwise the picker stays empty until the next popup open.
+    state.modelsCache = [];
     updateActiveEngineLabel();
+    ensureModels();
   });
   els.groqKeyToggle.addEventListener("click", () => { els.groqApiKey.type = els.groqApiKey.type === "password" ? "text" : "password"; });
   els.keyToggle.addEventListener("click", () => { els.apiKey.type = els.apiKey.type === "password" ? "text" : "password"; });

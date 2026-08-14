@@ -19,12 +19,17 @@ const openrouterEngine = makeCloudEngine({
 });
 
 // Cloud-free engine: Groq (the user's own free key), fast, generous per-user limit.
+// Model is user-selected via the Groq model picker; falls back to GROQ_DEFAULT_MODEL
+// if nothing's stored yet (first run).
 const groqEngine = makeCloudEngine({
   id: "groq",
   label: "Groq · free",
   baseUrl: GROQ_BASE,
   keyName: "groqApiKey",
-  resolveModel: async () => ({ model: GROQ_DEFAULT_MODEL }),
+  resolveModel: async () => {
+    const { groqModel } = await storage.get(["groqModel"]);
+    return { model: groqModel || GROQ_DEFAULT_MODEL };
+  },
   quotaKey: "groqQuota",
 });
 
@@ -70,21 +75,20 @@ export function engineKeyVisibility(engine) {
 }
 
 // Pure: whether the OpenRouter model picker is relevant for a chosen engine.
-// on-device, Groq, local, and openaicompat each use their own configured
-// model, so the Model section shows a read-only summary for them instead of
-// the picker; OpenRouter (and Auto, which may route to it) show the picker.
+// on-device, local, and openaicompat each use their own configured model, so
+// the Model section shows a read-only summary for them; openrouter, groq,
+// and auto (which may route to either) show a picker.
 export function engineUsesModelPicker(engine) {
-  return engine !== "ondevice" && engine !== "groq" && engine !== "local" && engine !== "openaicompat";
+  return engine === "openrouter" || engine === "groq" || engine === "auto" || engine === undefined || engine === null;
 }
 
 // Pure: read-only label of the model a fixed-model engine uses, for the Model
 // section when there's no picker. Returns null for picker engines (openrouter /
-// auto). The local + openaicompat engines have dynamic models, so they're
+// groq / auto). The local + openaicompat engines have dynamic models, so they're
 // resolved by the caller.
 export function engineModelSummary(engine) {
   switch (engine) {
     case "ondevice": return "Gemini Nano · runs on your device";
-    case "groq": return "Llama 3.3 70B · via Groq";
     default: return null;
   }
 }
